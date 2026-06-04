@@ -205,17 +205,86 @@ This **must** be registered in the device's USB descriptor. Ensure FX2G3 firmwar
 
 ---
 
-## Quick Commands
+## Build System
+
+### ModusToolbox Make Build
+
+This project uses **ModusToolbox** with a **GNU Make + Ninja** build system. All builds are executed through the `modus-shell` environment.
+
+### Build Commands
+
+From the project root directory (in ModusToolbox modus-shell):
+
+```bash
+# Build firmware (Debug configuration)
+make build
+
+# Build firmware (Release configuration)  
+make build CONFIG=Release
+
+# Program device via OpenOCD
+make program
+
+# Erase device flash
+make erase
+
+# Clean build artifacts
+make clean
+```
+
+### Build Configuration
+
+- **Default Toolchain:** GNU Arm Embedded Compiler v14.2.1 (`GCC_ARM`)
+- **Default Configuration:** Debug
+- **Default Target:** `APP_KIT_FX2G3_104LGA`
+
+### Build Artifacts
+
+Built files are located in: `build/Debug/` or `build/Release/`
+
+Key output files:
+- `mtb-example-fx2g3-hello-world.elf` - Executable firmware
+- `mtb-example-fx2g3-hello-world.hex` - Intel HEX format (for bootloader)
+- `mtb-example-fx2g3-hello-world.bin` - Binary firmware image
+
+### Makefile Configuration
+
+Key build variables in `Makefile`:
+
+```makefile
+USBFS_LOGS_ENABLE=0         # Disable USB CDC logging
+BLOAD_ENABLE=0              # Bootloader disabled for normal operation
+```
+
+To enable bootloader support:
+```bash
+# Edit Makefile: BLOAD_ENABLE=1, then rebuild
+make clean && make build
+```
+
+### ModusToolbox Setup
+
+Required:
+- [ModusToolbox 3.5+](https://www.infineon.com/modustoolbox)
+- Run from **modus-shell** (Windows) or native bash (Linux/macOS)
+- OpenOCD for device programming
+
+---
+
+## Quick Reference
 
 ```bash
 # Build firmware
 make build
 
-# Clean build
-make clean
-
-# Flash to device
+# Program to device
 make program
+
+# Erase device
+make erase
+
+# Clean build artifacts
+make clean
 
 # Open workspace in VS Code (optional)
 code FX2G3_RTBox.code-workspace
