@@ -7,6 +7,8 @@
 - Firmware with bootloader support for OTA updates via PMODE button
 - Host application (PowerScope) for data visualization and control
 
+**This Repository:** [github.com/mwattenberg/PowerScope_FX2G3](https://github.com/mwattenberg/PowerScope_FX2G3) - Firmware for FX2G3 MCU
+
 **Related Repository:** [PowerScope](https://github.com/mwattenberg/PowerScope) - Host application for Windows/C# that receives and processes streamed data.
 
 ---
@@ -111,14 +113,37 @@ make program        # Flash firmware to device via OpenOCD
 
 ---
 
-## Key Files & Responsibilities
+## Design Decisions
 
-| File | Purpose | Status |
-|------|---------|--------|
-| `main.c` | Firmware entry point, initialization | ❓ TBD |
-| `cm0_code.c` | Core Cortex-M0+ logic, USB handler | ❓ TBD |
-| `UART/SPI drivers` | Interface to peripherals | ❓ TBD |
-| `USB endpoint implementation` | Bulk streaming, control transfers | ⚠️ **To Implement** |
+### Removed Features
+To keep the codebase clean and focused on core functionality:
+
+1. **USB FS Debug Logging (CDC Interface)**
+   - Removed: Infineon example included USB CDC debug interface
+   - Reason: Cortex-M4 debugger provides superior debugging; USB CDC interface adds unnecessary complexity
+   - Result: Cleaner codebase, faster development
+   - **Note:** `USBFS_LOGS_ENABLE` build flag disabled
+
+2. **ADC Functionality**
+   - Removed: Infineon example included ADC sampling code
+   - Reason: Hardware requirements don't include analog measurements; UART/SPI data streaming is the focus
+   - Result: Simplified peripheral initialization, reduced power consumption
+   - **Note:** ADC clock initialization disabled
+
+### Retained Features
+- **Dual-Core Architecture:** Both M0+ and M4 cores functional (enables real-time processing)
+- **USB Bulk Endpoints:** For streaming UART/SPI data to host
+- **UART Interface:** SCB[1] configured for serial communication input
+- **SPI Interface:** SCB[4] configured as Master for serial device communication
+
+### Peripheral Configuration
+
+| Peripheral | Instance | Mode | Purpose |
+|-----------|----------|------|---------|
+| UART | SCB[1] | Standard UART | Serial data input from external UART devices |
+| SPI | SCB[4] | Master (Motorola) | Serial data input from SPI devices |
+
+See `bsps/TARGET_APP_KIT_FX2G3_104LGA/config/design.modus` for detailed GPIO and clock configuration.
 
 ---
 
