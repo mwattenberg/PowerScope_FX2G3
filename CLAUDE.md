@@ -271,7 +271,137 @@ Required:
 
 ---
 
-## Quick Reference
+## USB Interface Implementation (UsbInterface Branch)
+
+### Overview
+
+This section covers custom USB endpoint implementation using WinUSB driver on the FX2G3 chip. The FX2 has a built-in Configurator tool for defining USB descriptors.
+
+### USB Descriptor Components (Using FX2 Configurator)
+
+The FX2 Configurator tool allows configuring the following USB descriptors:
+
+1. **Device Descriptor**
+   - VID/PID (Vendor ID / Product ID)
+   - Device class and version
+   - Max packet size for EP0
+   - Device GUID for WinUSB enumeration
+
+2. **Configuration Descriptor**
+   - Power requirements (bus-powered vs self-powered)
+   - Number of interfaces and alternate settings
+
+3. **Interface Descriptor**
+   - Interface number and alternate settings
+   - Class and subclass codes
+   - String descriptors for human-readable names
+
+4. **Endpoint Descriptors**
+   - **Bulk IN (0x81):** Streaming data from device to host
+     - Purpose: UART/SPI data transmission
+     - Direction: IN (device → host)
+     - Transfer Type: Bulk
+     - Max packet size: 64 bytes (FS) or 512 bytes (HS)
+   - **Bulk OUT (0x01):** Optional command endpoint (reserve for future use)
+
+5. **String Descriptors**
+   - Device manufacturer, product name, serial number
+   - Interface description
+
+### Debugging USB Descriptors
+
+#### Method 1: Host Enumeration Tools (Recommended for initial debug)
+- **Zadig Tool** (easiest): Shows raw USB descriptor info
+  - Install WinUSB driver automatically
+  - Displays Device GUID and all descriptor information
+  - Free, Windows-only: https://zadig.akeo.ie/
+  
+- **USBTreeView**: Shows full USB device tree and descriptor breakdown
+  - More detailed information than Zadig
+  - http://www.usbdeview.com/usbdevice.html
+
+- **Windows Device Manager**: 
+  - Plug device and check `Hardware IDs` property
+  - Verify device is detected correctly
+  - Check for driver assignment (WinUSB)
+
+#### Method 2: Firmware-side Verification
+- Add simple test code to verify descriptor is loaded:
+  ```c
+  // Read descriptor from firmware (verify it was programmed)
+  // Use debugger or serial output to confirm descriptor values
+  ```
+
+#### Method 3: PowerScope Host Application
+- Once descriptors are correct, PowerScope should:
+  1. Enumerate the device
+  2. Find device by GUID
+  3. Open bulk IN endpoint (0x81)
+  4. Begin receiving data (initially test pattern from UART/SPI)
+
+### Implementation Workflow
+
+**Step 1: Define USB Descriptors (Using FX2 Configurator)**
+- Open FX2 Configurator tool
+- Configure Device Descriptor: VID 0x2B2D, PID 0x0001
+- Set Device GUID: `{8D2C9D52-5C6B-4F0B-9F1B-3EBE8C4F9A61}` (WinUSB requirement)
+- Configure Interface with Bulk IN endpoint (0x81, 64 bytes)
+- Add string descriptors (optional but recommended)
+- Export/generate descriptor code
+
+**Step 2: Firmware Integration**
+- Include generated descriptor code in USB stack initialization
+- Implement USB control transfer handlers (optional, for future commands)
+- Implement bulk IN endpoint interrupt/DMA handler
+- Route UART/SPI data to bulk IN FIFO
+
+**Step 3: Host-side Testing (PowerScope)**
+- Enumerate USB device
+- Verify GUID match
+- Open endpoint 0x81
+- Receive and display test data
+
+**Step 4: Validation**
+- Use Zadig to verify descriptor is recognized by host
+- Verify Device GUID appears correctly
+- Test with PowerScope enumeration code
+
+### USB Descriptor Debugging Checklist
+
+- [ ] Device is detected by Windows Device Manager
+- [ ] Zadig/USBTreeView shows correct VID/PID
+- [ ] Device GUID matches firmware descriptor and PowerScope code
+- [ ] WinUSB driver successfully assigned by Zadig
+- [ ] PowerScope can enumerate device by GUID
+- [ ] PowerScope can open bulk IN endpoint (0x81)
+- [ ] Test data flows from firmware to host (initial UART/SPI test pattern)
+
+### Important: Device GUID for WinUSB
+
+WinUSB drivers require an explicit GUID. The FX2G3 firmware must:
+
+1. Include GUID in USB Device Descriptor (or descriptor extension)
+2. Use: `{8D2C9D52-5C6B-4F0B-9F1B-3EBE8C4F9A61}`
+3. Ensure PowerScope app searches for this exact GUID
+
+### USB Protocol (Pending Detailed Design)
+
+**Control Transfers (optional, for future enhancement):**
+- `REQ_START (0xA0)` - Begin streaming
+- `REQ_STOP (0xA1)` - Stop streaming
+
+**Bulk IN (0x81) - Data Streaming Format (TBD):**
+- Currently: Test pattern (UART test pattern + SPI test pattern)
+- Future: Timestamp + Channel ID + Sample Data
+
+**Expected Data Rate:**
+- Host polls at ~1000 Hz
+- Each packet: 64 bytes (FS USB)
+- Theoretical bandwidth: ~65 KB/s (conservative for UART/SPI data)
+
+---
+
+
 
 ```bash
 # Build firmware
