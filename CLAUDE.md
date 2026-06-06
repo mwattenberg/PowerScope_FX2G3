@@ -16,7 +16,7 @@
 ## Architecture
 
 ### Firmware (This Repository)
-- **MCU:** EZ-USB FX2G3 (Infineon ARM Cortex-M0+)
+- **MCU:** EZ-USB FX2G3 (Infineon dual-core: ARM Cortex-M0+ + ARM Cortex-M4)
 - **Toolchain:** ModusToolbox v3.5+, GNU Arm Embedded Compiler v14.2.1
 - **Key Components:**
   - USB endpoint for bulk data streaming (custom protocol)
@@ -301,7 +301,7 @@ The FX2 Configurator tool allows configuring the following USB descriptors:
      - Purpose: UART/SPI data transmission
      - Direction: IN (device → host)
      - Transfer Type: Bulk
-     - Max packet size: 64 bytes (FS) or 512 bytes (HS)
+     - Max packet size: **512 bytes (USB HS)** - See throughput analysis below
    - **Bulk OUT (0x01):** Optional command endpoint (reserve for future use)
 
 5. **String Descriptors**
@@ -318,7 +318,7 @@ The FX2 Configurator tool allows configuring the following USB descriptors:
   
 - **USBTreeView**: Shows full USB device tree and descriptor breakdown
   - More detailed information than Zadig
-  - http://www.usbdeview.com/usbdevice.html
+  - https://www.uwe-sieber.de/usbtreeview_e.html
 
 - **Windows Device Manager**: 
   - Plug device and check `Hardware IDs` property
@@ -343,9 +343,9 @@ The FX2 Configurator tool allows configuring the following USB descriptors:
 
 **Step 1: Define USB Descriptors (Using FX2 Configurator)**
 - Open FX2 Configurator tool
-- Configure Device Descriptor: VID 0x2B2D, PID 0x0001
+- Configure Device Descriptor: VID 0x2B2D, PID 0x0001, **USB 2.0 High-Speed**
 - Set Device GUID: `{8D2C9D52-5C6B-4F0B-9F1B-3EBE8C4F9A61}` (WinUSB requirement)
-- Configure Interface with Bulk IN endpoint (0x81, 64 bytes)
+- Configure Interface with Bulk IN endpoint (0x81, **512 bytes**)
 - Add string descriptors (optional but recommended)
 - Export/generate descriptor code
 
@@ -378,9 +378,9 @@ The FX2 Configurator tool allows configuring the following USB descriptors:
 
 ### Important: Device GUID for WinUSB
 
-WinUSB drivers require an explicit GUID. The FX2G3 firmware must:
+WinUSB drivers require an explicit GUID conveyed via **Microsoft OS 2.0 Descriptors** (BOS descriptor extension), not the standard USB Device Descriptor. The FX2G3 firmware must:
 
-1. Include GUID in USB Device Descriptor (or descriptor extension)
+1. Configure GUID via Microsoft OS 2.0 Descriptors (FX2 Configurator handles this)
 2. Use: `{8D2C9D52-5C6B-4F0B-9F1B-3EBE8C4F9A61}`
 3. Ensure PowerScope app searches for this exact GUID
 
@@ -394,10 +394,24 @@ WinUSB drivers require an explicit GUID. The FX2G3 firmware must:
 - Currently: Test pattern (UART test pattern + SPI test pattern)
 - Future: Timestamp + Channel ID + Sample Data
 
-**Expected Data Rate:**
-- Host polls at ~1000 Hz
-- Each packet: 64 bytes (FS USB)
-- Theoretical bandwidth: ~65 KB/s (conservative for UART/SPI data)
+### Throughput Analysis
+
+**USB HS Specifications:**
+- FX2G3 supports **USB 2.0 High-Speed (480 Mbps)**
+- Bulk IN packet size: **512 bytes** (vs. 64 bytes for Full-Speed)
+- Practical sustained throughput: ~40-50 MB/s (accounting for protocol overhead)
+
+**Data Source Specifications:**
+- **SPI:** 20 Mbps clock → **2.5 MB/s** (8-bit transfers per clock)
+- **UART:** 6 MBaud → **0.75 MB/s** (8-bit transfers)
+- **Combined:** ~3.25 MB/s
+- **Data sources are the bottleneck, not USB**
+
+**PowerScope Streaming Design:**
+- Bulk IN endpoint (0x81) easily handles 2.5 MB/s SPI data
+- 512-byte packets at USB HS: plenty of headroom for timestamps, metadata, multi-channel future expansion
+- No backpressure expected—USB can drain data faster than SPI can generate it
+- Conservative target: **2-3 MB/s** sustained (well within USB HS capability)
 
 ---
 

@@ -6,3 +6,6 @@ images
 .settings
 .vscode
 
+# Ignore generated USBDEV files since we use custom USBFXStack descriptors
+bsps/TARGET_APP_KIT_FX2G3_104LGA/config/GeneratedSource/cycfg_usbdev.c
+bsps/TARGET_APP_KIT_FX2G3_104LGA/config/GeneratedSource/cycfg_usbdev.h

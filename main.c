@@ -2,10 +2,10 @@
 * \file main.c
 * \version 1.0
 *
-* \brief Main source file of the FX2G3 device - UART and SPI test application.
+* \brief Main source file of the FX2G3 device - UART and SPI test application with USB streaming.
 *
 * Tests basic UART and SPI functionality by outputting test signals
-* that can be verified with a logic analyzer.
+* and streaming them over High-Speed USB bulk endpoint 0x81 (Bulk IN).
 *
 *******************************************************************************
 * \copyright
@@ -21,8 +21,44 @@
 #include "app_version.h"
 #include "cybsp.h"
 
-/* Test timing */
-#define TEST_INTERVAL_MS    500
+/* USB and HBDMA Headers */
+#include "cy_usb_common.h"
+#include "cy_usb_usbd.h"
+#include "usb_descriptors.h"
+#include "cy_usbhs_cal_drv.h"
+#include "cy_hbdma.h"
+#include "cy_hbdma_mgr.h"
+
+/* Test timing (1 ms for 1000 Hz USB streaming speed) */
+#define TEST_INTERVAL_MS    1
+
+/* Global variables associated with High BandWidth DMA setup. */
+cy_stc_hbdma_context_t HBW_DrvCtxt;     /* High BandWidth DMA driver context. */
+cy_stc_hbdma_dscr_list_t HBW_DscrList;  /* High BandWidth DMA descriptor free list. */
+cy_stc_hbdma_buf_mgr_t HBW_BufMgr;      /* High BandWidth DMA buffer manager. */
+cy_stc_hbdma_mgr_context_t HBW_MgrCtxt; /* High BandWidth DMA manager context. */
+
+cy_stc_usb_usbd_ctxt_t usbdCtxt;
+cy_stc_usb_cal_ctxt_t hsCalCtxt;
+cy_stc_hbdma_channel_t ep1InDmaChannel;
+
+volatile bool usbConfigured = false;
+volatile bool streamingEnabled = false;
+
+/* Function prototypes */
+void SetupEp1Dma(void);
+extern void Ep1InDma_ISR(void);
+void InEpDma_ISR(uint8_t endpNum);
+void Cy_USB_HS_ISR(void);
+void HbDma_Callback(cy_stc_hbdma_channel_t *handle, cy_en_hbdma_cb_type_t type, cy_stc_hbdma_buff_status_t *pbufStat, void *userCtx);
+void SetupCallback(void *pAppCtxt, cy_stc_usb_usbd_ctxt_t *pUsbdCtxt, cy_stc_usb_cal_msg_t *pMsg);
+void SetConfigCallback(void *pAppCtxt, cy_stc_usb_usbd_ctxt_t *pUsbdCtxt, cy_stc_usb_cal_msg_t *pMsg);
+void BusResetCallback(void *pAppCtxt, cy_stc_usb_usbd_ctxt_t *pUsbdCtxt, cy_stc_usb_cal_msg_t *pMsg);
+void Cy_Fx2g3_OnResetInit(void);
+void Cy_OnResetUser(void);
+void Cy_Fx2g3_InitPeripheralClocks(bool adcClkEnable, bool usbfsClkEnable);
+void USB_Init(void);
+bool USB_Stream_Write(const uint8_t* data, uint32_t length);
 
 /**
 * \brief Initialize UART (SCB1)
@@ -78,6 +114,9 @@ void AppInit(void)
    /* Initialize UART and SPI */
    UART_Init();
    SPI_Init();
+
+   /* Initialize USB Interface */
+   USB_Init();
 }
 
 /**
@@ -98,6 +137,7 @@ int main(void)
     
    /* Main test loop */
    while (1) {
+       
        /* Send UART test pattern */
        uint8_t uart_msg[] = "LOOP_";
        Cy_SCB_UART_PutArrayBlocking(UART_HW, (uint8_t*)uart_msg, sizeof(uart_msg) - 1);
@@ -115,15 +155,464 @@ int main(void)
        while (Cy_SCB_SPI_IsBusBusy(SPI_HW)) {
            /* Wait for SPI to finish */
        }
-        
-       /* Toggle LED to indicate test is running */
-       //Cy_GPIO_Inv(P4_3_PORT, P4_3_PIN);
+
+       /* Send data over USB if streaming is enabled */
+       if (streamingEnabled && usbConfigured) {
+          /* Construct 8-channel frame with 0xAAAA frame start
+           * Total frame size: 2 bytes frame start + (8 channels * 2 bytes each) = 18 bytes.
+           * Since channels are expected as 16-bit little-endian values,
+           * we can send constant or slowly incrementing patterns for visual confirmation.
+           */
+          uint8_t usb_packet[18];
+           
+          /* Frame start: 0xAAAA (sent as two bytes 0xAA, 0xAA) */
+          usb_packet[0] = 0xAA;
+          usb_packet[1] = 0xAA;
+           
+          /* Channel 0: slow ramp */
+          uint16_t ch0 = (uint16_t)(loopCount & 0xFFFF);
+          usb_packet[2] = (uint8_t)(ch0 & 0xFF);
+          usb_packet[3] = (uint8_t)((ch0 >> 8) & 0xFF);
+           
+          /* Channel 1: square wave */
+          uint16_t ch1 = (uint16_t)((loopCount & 0x10) ? 1000 : 200);
+          usb_packet[4] = (uint8_t)(ch1 & 0xFF);
+          usb_packet[5] = (uint8_t)((ch1 >> 8) & 0xFF);
+           
+          /* Channel 2: slowly incrementing ramp */
+          uint16_t ch2 = (uint16_t)((loopCount / 2) & 0xFFFF);
+          usb_packet[6] = (uint8_t)(ch2 & 0xFF);
+          usb_packet[7] = (uint8_t)((ch2 >> 8) & 0xFF);
+           
+          /* Channel 3: constant 100 */
+          uint16_t ch3 = 100;
+          usb_packet[8] = (uint8_t)(ch3 & 0xFF);
+          usb_packet[9] = (uint8_t)((ch3 >> 8) & 0xFF);
+           
+          /* Channel 4: constant 500 */
+          uint16_t ch4 = 500;
+          usb_packet[10] = (uint8_t)(ch4 & 0xFF);
+          usb_packet[11] = (uint8_t)((ch4 >> 8) & 0xFF);
+           
+          /* Channel 5: constant 1000 */
+          uint16_t ch5 = 1000;
+          usb_packet[12] = (uint8_t)(ch5 & 0xFF);
+          usb_packet[13] = (uint8_t)((ch5 >> 8) & 0xFF);
+           
+          /* Channel 6: constant 2000 */
+          uint16_t ch6 = 2000;
+          usb_packet[14] = (uint8_t)(ch6 & 0xFF);
+          usb_packet[15] = (uint8_t)((ch6 >> 8) & 0xFF);
+           
+          /* Channel 7: constant 4000 */
+          uint16_t ch7 = 4000;
+          usb_packet[16] = (uint8_t)(ch7 & 0xFF);
+          usb_packet[17] = (uint8_t)((ch7 >> 8) & 0xFF);
+           
+          USB_Stream_Write(usb_packet, sizeof(usb_packet));
+       }
         
        loopCount++;
        Cy_SysLib_Delay(TEST_INTERVAL_MS);
    }
     
    return 0;
+}
+
+/**
+ * \name Cy_USB_HS_ISR
+ * \brief Handler for USB-HS Interrupts.
+ */
+void Cy_USB_HS_ISR(void)
+{
+    Cy_USBHS_Cal_IntrHandler(&hsCalCtxt);
+}
+
+/**
+ * \name SysTick_Handler
+ * \brief SysTick interrupt service routine for 1ms ticks.
+ */
+void SysTick_Handler(void)
+{
+    Cy_USBD_TickIncrement(&usbdCtxt);
+}
+
+/**
+ * \name Cy_Fx2g3_InitPeripheralClocks
+ * \brief Enables clocks to different peripherals on the FX2G3 device.
+ */
+void Cy_Fx2g3_InitPeripheralClocks(bool adcClkEnable, bool usbfsClkEnable)
+{
+    if (adcClkEnable) {
+        /* Divide PERI clock at 75 MHz by 75 to get 1 MHz clock using 16-bit divider #1. */
+        Cy_SysClk_PeriphSetDivider(CY_SYSCLK_DIV_16_BIT, 1, 74);
+        Cy_SysClk_PeriphEnableDivider(CY_SYSCLK_DIV_16_BIT, 1);
+        Cy_SysLib_DelayUs(10U);
+        Cy_SysClk_PeriphAssignDivider(PCLK_LVDS2USB32SS_CLOCK_SAR, CY_SYSCLK_DIV_16_BIT, 1);
+    }
+
+    if (usbfsClkEnable) {
+        /* Divide PERI clock at 75 MHz by 750 to get 100 KHz clock using 16-bit divider #2. */
+        Cy_SysClk_PeriphSetDivider(CY_SYSCLK_DIV_16_BIT, 2, 749);
+        Cy_SysClk_PeriphEnableDivider(CY_SYSCLK_DIV_16_BIT, 2);
+        Cy_SysLib_DelayUs(10U);
+        Cy_SysClk_PeriphAssignDivider(PCLK_USB_CLOCK_DEV_BRS, CY_SYSCLK_DIV_16_BIT, 2);
+    }
+}
+
+/**
+ * \name Cy_Fx2g3_OnResetInit
+ * \brief Enables high bandwidth RAM at reset.
+ */
+void Cy_Fx2g3_OnResetInit(void)
+{
+    /* Enable clk_hf4 with IMO as input. */
+    SRSS->CLK_ROOT_SELECT[4] = SRSS_CLK_ROOT_SELECT_ENABLE_Msk;
+
+    /* Enable LVDS2USB32SS IP and select clk_hf[4] as clock input. */
+    MAIN_REG->CTRL = (
+            MAIN_REG_CTRL_IP_ENABLED_Msk |
+            (1UL << MAIN_REG_CTRL_NUM_FAST_AHB_STALL_CYCLES_Pos) |
+            (1UL << MAIN_REG_CTRL_NUM_SLOW_AHB_STALL_CYCLES_Pos) |
+            (3UL << MAIN_REG_CTRL_DMA_SRC_SEL_Pos));
+}
+
+/**
+ * \name Cy_OnResetUser
+ * \brief Startup hook before scatter loading is performed.
+ */
+void Cy_OnResetUser(void)
+{
+    Cy_Fx2g3_OnResetInit();
+}
+
+/**
+ * \name HbDma_Callback
+ * \brief Empty callback for HBDMA.
+ */
+void HbDma_Callback(cy_stc_hbdma_channel_t *handle, cy_en_hbdma_cb_type_t type, cy_stc_hbdma_buff_status_t *pbufStat, void *userCtx)
+{
+    (void)handle;
+    (void)type;
+    (void)pbufStat;
+    (void)userCtx;
+}
+
+/**
+ * \name SetupEp1Dma
+ * \brief Configures Endpoint 1 IN (Bulk IN 0x81) and its HBDMA channel.
+ */
+void SetupEp1Dma(void)
+{
+    cy_stc_usb_endp_config_t endpConfig;
+    extern void Ep1InDma_ISR(void);
+    char log_buf[128];
+
+    /* Send starting message */
+    Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)"[SetupEp1Dma] Starting EP1 HBDMA setup...\r\n", 43);
+
+    if (ep1InDmaChannel.state != CY_HBDMA_CHN_NOT_CONFIGURED) {
+        Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)"[SetupEp1Dma] Existing channel found. Disabling & destroying...\r\n", 65);
+        
+        cy_en_hbdma_mgr_status_t dis_status = Cy_HBDma_Channel_Disable(&ep1InDmaChannel);
+        snprintf(log_buf, sizeof(log_buf), "[SetupEp1Dma] Disabling channel, status: 0x%08X\r\n", (unsigned int)dis_status);
+        Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)log_buf, strlen(log_buf));
+        
+        Cy_SysLib_Delay(1);
+        
+        cy_en_hbdma_mgr_status_t dest_status = Cy_HBDma_Channel_Destroy(&ep1InDmaChannel);
+        snprintf(log_buf, sizeof(log_buf), "[SetupEp1Dma] Destroying channel, status: 0x%08X\r\n", (unsigned int)dest_status);
+        Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)log_buf, strlen(log_buf));
+        
+        Cy_SysLib_Delay(1);
+    }
+    
+    /* 1. Configure the Endpoint in USBD */
+    endpConfig.endpType = CY_USB_ENDP_TYPE_BULK;
+    endpConfig.endpDirection = CY_USB_ENDP_DIR_IN;
+    endpConfig.valid = true;
+    endpConfig.endpNumber = 1;
+    /* Packetsize is 512 for High Speed, 64 for Full Speed */
+    uint16_t maxPktSize = (Cy_USBD_GetDeviceSpeed(&usbdCtxt) == CY_USBD_USB_DEV_HS) ? 512 : 64;
+    
+    snprintf(log_buf, sizeof(log_buf), "[SetupEp1Dma] USB Device Speed: %d, maxPktSize: %u\r\n", 
+             (int)Cy_USBD_GetDeviceSpeed(&usbdCtxt), (unsigned int)maxPktSize);
+    Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)log_buf, strlen(log_buf));
+
+    endpConfig.maxPktSize = maxPktSize;
+    endpConfig.isoPkts = 0;
+    endpConfig.burstSize = 0;
+    endpConfig.streamID = 0;
+    endpConfig.interval = 0;
+    endpConfig.allowNakTillDmaRdy = true;
+
+    Cy_USB_USBD_EndpConfig(&usbdCtxt, endpConfig);
+    Cy_USBD_ResetEndp(&usbdCtxt, 1, CY_USB_ENDP_DIR_IN, false);
+    Cy_SysLib_Delay(1);
+
+    /* 2. Configure the HBDMA channel for EP1 IN */
+    cy_stc_hbdma_chn_config_t dmaConfig;
+    memset(&dmaConfig, 0, sizeof(dmaConfig));
+    dmaConfig.size         = maxPktSize;
+    dmaConfig.prodBufSize  = maxPktSize;
+    dmaConfig.count        = 4; /* Use 4 buffers for ping-pong */
+    dmaConfig.prodHdrSize  = 0;
+    dmaConfig.eventEnable  = 0;
+    dmaConfig.intrEnable   = LVDSSS_LVDS_ADAPTER_DMA_SCK_INTR_CONSUME_EVENT_Msk;
+    dmaConfig.bufferMode   = false;
+    dmaConfig.chType       = CY_HBDMA_TYPE_MEM_TO_IP;
+    dmaConfig.prodSckCount = 1;
+    dmaConfig.prodSck[0]   = CY_HBDMA_VIRT_SOCKET_WR;
+    dmaConfig.consSckCount = 1;
+    dmaConfig.consSck[0]   = (cy_hbdma_socket_id_t)(CY_HBDMA_USBHS_IN_EP_00 + 1); /* EP1 IN */
+    dmaConfig.usbMaxPktSize = maxPktSize;
+    dmaConfig.cb           = HbDma_Callback;
+    dmaConfig.userCtx      = NULL;
+
+    cy_en_hbdma_mgr_status_t create_status = Cy_HBDma_Channel_Create(&HBW_MgrCtxt, &ep1InDmaChannel, &dmaConfig);
+    snprintf(log_buf, sizeof(log_buf), "[SetupEp1Dma] Cy_HBDma_Channel_Create, status: 0x%08X (state: %d)\r\n", 
+             (unsigned int)create_status, (int)ep1InDmaChannel.state);
+    Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)log_buf, strlen(log_buf));
+    
+    /* 3. Initialize CPU DMA Interrupt for DW1 channel 1 (IN endpoint 1) */
+    cy_stc_sysint_t intrCfg;
+    intrCfg.intrPriority = 5;
+    intrCfg.intrSrc = (IRQn_Type)(cpuss_interrupts_dw1_0_IRQn + 1);
+    
+    Cy_SysInt_Init(&intrCfg, Ep1InDma_ISR);
+    NVIC_EnableIRQ(intrCfg.intrSrc);
+    
+    /* Enable HBDMA Channel */
+    cy_en_hbdma_mgr_status_t en_status = Cy_HBDma_Channel_Enable(&ep1InDmaChannel, 0);
+    snprintf(log_buf, sizeof(log_buf), "[SetupEp1Dma] Cy_HBDma_Channel_Enable, status: 0x%08X\r\n", (unsigned int)en_status);
+    Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)log_buf, strlen(log_buf));
+}
+
+/**
+ * \name InEpDma_ISR
+ * \brief Interrupt handler for EP1 IN DMA completions (overrides library weak symbol).
+ */
+void InEpDma_ISR(uint8_t endpNum)
+{
+    (void)endpNum;
+    Cy_HBDma_Mgr_HandleDW1Interrupt(&HBW_MgrCtxt);
+}
+
+/**
+ * \name SetupCallback
+ * \brief Handles control endpoint 0 requests, including custom WinUSB requests.
+ */
+void SetupCallback(void *pAppCtxt, cy_stc_usb_usbd_ctxt_t *pUsbdCtxt, cy_stc_usb_cal_msg_t *pMsg)
+{
+    uint32_t setupData0 = pMsg->data[0];
+    uint32_t setupData1 = pMsg->data[1];
+
+    uint8_t bmRequest = (uint8_t)((setupData0 & CY_USB_BMREQUEST_SETUP0_MASK) >> CY_USB_BMREQUEST_SETUP0_POS);
+    uint8_t bRequest = (uint8_t)((setupData0 & CY_USB_BREQUEST_SETUP0_MASK) >> CY_USB_BREQUEST_SETUP0_POS);
+    uint16_t wValue = (uint16_t)((setupData0 & CY_USB_WVALUE_SETUP0_MASK) >> CY_USB_WVALUE_SETUP0_POS);
+    uint16_t wIndex = (uint16_t)((setupData1 & CY_USB_WINDEX_SETUP1_MASK) >> CY_USB_WINDEX_SETUP1_POS);
+    uint16_t wLength = (uint16_t)((setupData1 & CY_USB_WLENGTH_SETUP1_MASK) >> CY_USB_WLENGTH_SETUP1_POS);
+
+    uint8_t reqType = ((bmRequest & CY_USB_CTRL_REQ_TYPE_MASK) >> CY_USB_CTRL_REQ_TYPE_POS);
+    uint8_t bTarget = (bmRequest & CY_USB_CTRL_REQ_RECIPENT_MASK);
+
+    bool isReqHandled = false;
+
+    if (reqType == CY_USB_CTRL_REQ_STD) {
+        /* Microsoft OS String Descriptor request at index 0xEE */
+        if ((bTarget == CY_USB_CTRL_REQ_RECIPENT_DEVICE) &&
+            (bRequest == CY_USB_SC_GET_DESCRIPTOR) &&
+            (wValue == ((CY_USB_STRING_DSCR << 8) | 0xEE))) {
+            
+            if (wLength > glOsString[0]) {
+                wLength = glOsString[0];
+            }
+            Cy_USB_USBD_SendEndp0Data(pUsbdCtxt, (uint8_t *)glOsString, wLength);
+            isReqHandled = true;
+        }
+    }
+    else if (reqType == CY_USB_CTRL_REQ_VENDOR) {
+        /* Microsoft OS Compatibility and Feature descriptor requests */
+        if (bRequest == MS_VENDOR_CODE) {
+            if (wIndex == 0x04) {
+                if (wLength > *((uint16_t *)glOsCompatibilityId)) {
+                    wLength = *((uint16_t *)glOsCompatibilityId);
+                }
+                Cy_USB_USBD_SendEndp0Data(pUsbdCtxt, (uint8_t *)glOsCompatibilityId, wLength);
+                isReqHandled = true;
+            } else if (wIndex == 0x05) {
+                if (wLength > *((uint16_t *)glOsFeature)) {
+                    wLength = *((uint16_t *)glOsFeature);
+                }
+                Cy_USB_USBD_SendEndp0Data(pUsbdCtxt, (uint8_t *)glOsFeature, wLength);
+                isReqHandled = true;
+            }
+        }
+        /* Custom Control Transfers: Start (0xA0) / Stop (0xA1) streaming commands */
+        else if (bRequest == 0xA0) { /* REQ_START */
+            streamingEnabled = true;
+            Cy_USBD_SendAckSetupDataStatusStage(pUsbdCtxt);
+            isReqHandled = true;
+        }
+        else if (bRequest == 0xA1) { /* REQ_STOP */
+            streamingEnabled = false;
+            Cy_USBD_SendAckSetupDataStatusStage(pUsbdCtxt);
+            isReqHandled = true;
+        }
+    }
+
+    if (!isReqHandled) {
+        /* Stall EP0 for unhandled requests */
+        Cy_USB_USBD_EndpSetClearStall(pUsbdCtxt, 0, CY_USB_ENDP_DIR_IN, true);
+    }
+}
+
+/**
+ * \name SetConfigCallback
+ * \brief Invoked when device configuration has been selected.
+ */
+void SetConfigCallback(void *pAppCtxt, cy_stc_usb_usbd_ctxt_t *pUsbdCtxt, cy_stc_usb_cal_msg_t *pMsg)
+{
+    cy_stc_usb_setup_req_t *pSetupReq = (cy_stc_usb_setup_req_t *)(&(pMsg->data[0]));
+    
+    if (pSetupReq->wValue == 0) {
+        /* Set Config 0: disconnect/unconfigure */
+        usbConfigured = false;
+        streamingEnabled = false;
+        return;
+    }
+
+    /* Enable DW0 and DW1 blocks */
+    Cy_DMA_Enable((DW_Type *)DW0_BASE);
+    Cy_DMA_Enable((DW_Type *)DW1_BASE);
+
+    /* Setup EP1 DMA and Interrupts */
+    SetupEp1Dma();
+
+    usbConfigured = true;
+}
+
+/**
+ * \name BusResetCallback
+ * \brief Invoked when USB bus reset is detected.
+ */
+void BusResetCallback(void *pAppCtxt, cy_stc_usb_usbd_ctxt_t *pUsbdCtxt, cy_stc_usb_cal_msg_t *pMsg)
+{
+    usbConfigured = false;
+    streamingEnabled = false;
+}
+
+/**
+ * \name USB_Init
+ * \brief Performs the full initialization of the high-speed USB device stack.
+ */
+void USB_Init(void)
+{
+    cy_stc_sysint_t intrCfg;
+
+    /* Do peripheral clock configuration */
+    Cy_Fx2g3_InitPeripheralClocks(false, true);
+
+    /* Register the ISR for USBHS active and enable the interrupt. */
+    intrCfg.intrSrc      = usbhsdev_interrupt_u2d_active_o_IRQn;
+    intrCfg.intrPriority = 4;
+    Cy_SysInt_Init(&intrCfg, Cy_USB_HS_ISR);
+    NVIC_EnableIRQ(intrCfg.intrSrc);
+
+    /* Register ISR for USBHS deepsleep and enable the interrupt. */
+    intrCfg.intrSrc      = usbhsdev_interrupt_u2d_dpslp_o_IRQn;
+    intrCfg.intrPriority = 4;
+    Cy_SysInt_Init(&intrCfg, Cy_USB_HS_ISR);
+    NVIC_EnableIRQ(intrCfg.intrSrc);
+
+    /* Setup SysTick for 1ms ticks */
+    Cy_SysTick_SetClockSource(CY_SYSTICK_CLOCK_SOURCE_CLK_CPU);
+    Cy_SysTick_SetReload(Cy_SysClk_ClkFastGetFrequency() / 1000U);
+    Cy_SysTick_Clear();
+    Cy_SysTick_Enable();
+
+    memset((void *)&usbdCtxt, 0, sizeof(cy_stc_usb_usbd_ctxt_t));
+    memset((void *)&hsCalCtxt, 0, sizeof(cy_stc_usb_cal_ctxt_t));
+
+    /* Store IP base address in CAL context. */
+    hsCalCtxt.pCalBase = MXS40USBHSDEV_USBHSDEV;
+    hsCalCtxt.pPhyBase = MXS40USBHSDEV_USBHSPHY;
+
+    /* Initialize the HBW DMA IP and DMA Manager */
+    Cy_HBDma_Init(LVDSSS_LVDS, USB32DEV, &HBW_DrvCtxt, 0, 0);
+    Cy_HBDma_DscrList_Create(&HBW_DscrList, 16U);
+    Cy_HBDma_BufMgr_Create(&HBW_BufMgr, (uint32_t *)0x1C030000UL, 0x10000UL); /* 64KB */
+    Cy_HBDma_Mgr_Init(&HBW_MgrCtxt, &HBW_DrvCtxt, &HBW_DscrList, &HBW_BufMgr);
+    Cy_HBDma_Mgr_RegisterUsbContext(&HBW_MgrCtxt, &usbdCtxt);
+
+    /* Initialize the USBD layer */
+    Cy_USB_USBD_Init(NULL, &usbdCtxt, ((DMAC_Type *)DMAC_BASE), &hsCalCtxt, NUL-L, &HBW_MgrCtxt);
+
+    /* Enable stall cycles between back-to-back AHB accesses to high bandwidth RAM. */
+    MAIN_REG->CTRL = (MAIN_REG->CTRL & 0xF00FFFFFUL) | 0x09900000UL;
+
+    /* Register USB descriptors with the stack. */
+    Cy_USBD_SetDscr(&usbdCtxt, CY_USB_SET_HS_DEVICE_DSCR, 0, (uint8_t *)CyFxUSB20DeviceDscr);
+    Cy_USBD_SetDscr(&usbdCtxt, CY_USB_SET_HS_BOS_DSCR, 0, (uint8_t *)CyFxUSBBOSDscr);
+    Cy_USBD_SetDscr(&usbdCtxt, CY_USB_SET_DEVICE_QUAL_DSCR, 0, (uint8_t *)CyFxUSBDeviceQualDscr);
+    Cy_USBD_SetDscr(&usbdCtxt, CY_USB_SET_HS_CONFIG_DSCR, 0, (uint8_t *)CyFxUSBHSConfigDscr);
+    Cy_USBD_SetDscr(&usbdCtxt, CY_USB_SET_FS_CONFIG_DSCR, 0, (uint8_t *)CyFxUSBFSConfigDscr);
+    Cy_USBD_SetDscr(&usbdCtxt, CY_USB_SET_STRING_DSCR, 0, (uint8_t *)CyFxUSBStringLangIDDscr);
+    Cy_USBD_SetDscr(&usbdCtxt, CY_USB_SET_STRING_DSCR, 1, (uint8_t *)CyFxUSBManufactureDscr);
+    Cy_USBD_SetDscr(&usbdCtxt, CY_USB_SET_STRING_DSCR, 2, (uint8_t *)CyFxUSBProductDscr);
+    Cy_USBD_SetDscr(&usbdCtxt, CY_USB_SET_STRING_DSCR, 3, (uint8_t *)CyFxUSBConfigDscrStr);
+    Cy_USBD_SetDscr(&usbdCtxt, CY_USB_SET_STRING_DSCR, 4, (uint8_t *)CyFxUSBIntfDscrStr);
+
+    /* Register Callbacks */
+    Cy_USBD_RegisterCallback(&usbdCtxt, CY_USB_USBD_CB_SETUP, SetupCallback);
+    Cy_USBD_RegisterCallback(&usbdCtxt, CY_USB_USBD_CB_SET_CONFIG, SetConfigCallback);
+    Cy_USBD_RegisterCallback(&usbdCtxt, CY_USB_USBD_CB_RESET, BusResetCallback);
+
+    /* Enable USB 2.x connection (High Speed preferred) */
+    Cy_USBD_ConnectDevice(&usbdCtxt, CY_USBD_USB_DEV_HS);
+}
+
+/**
+ * \name USB_Stream_Write
+ * \brief Places data into a free high bandwidth DMA buffer and commits it to the hardware FIFO.
+ */
+bool USB_Stream_Write(const uint8_t* data, uint32_t length)
+{
+    if (!usbConfigured) return false;
+    
+    static cy_en_hbdma_mgr_status_t last_get_stat = CY_HBDMA_MGR_SUCCESS;
+    static cy_en_hbdma_mgr_status_t last_commit_stat = CY_HBDMA_MGR_SUCCESS;
+    
+    cy_stc_hbdma_buff_status_t buffStat;
+    cy_en_hbdma_mgr_status_t stat = Cy_HBDma_Channel_GetBuffer(&ep1InDmaChannel, &buffStat);
+    if (stat != CY_HBDMA_MGR_SUCCESS) {
+        if (stat != last_get_stat) {
+            char log_buf[128];
+            snprintf(log_buf, sizeof(log_buf), "[USB_Stream_Write] GetBuffer failed: 0x%08X\r\n", (unsigned int)stat);
+            Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)log_buf, strlen(log_buf));
+            last_get_stat = stat;
+        }
+        return false; /* No buffer available (backpressure) */
+    }
+    last_get_stat = CY_HBDMA_MGR_SUCCESS;
+    
+    /* Copy data to DMA buffer */
+    uint32_t bytesToCopy = (length < buffStat.size) ? length : buffStat.size;
+    memcpy((uint8_t*)buffStat.pBuffer, data, bytesToCopy);
+    buffStat.count = bytesToCopy;
+    
+    stat = Cy_HBDma_Channel_CommitBuffer(&ep1InDmaChannel, &buffStat);
+    if (stat != CY_HBDMA_MGR_SUCCESS) {
+        if (stat != last_commit_stat) {
+            char log_buf[128];
+            snprintf(log_buf, sizeof(log_buf), "[USB_Stream_Write] CommitBuffer failed: 0x%08X\r\n", (unsigned int)stat);
+            Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)log_buf, strlen(log_buf));
+            last_commit_stat = stat;
+        }
+        return false;
+    }
+    last_commit_stat = CY_HBDMA_MGR_SUCCESS;
+    return true;
 }
 
 /* [] END OF FILE */
