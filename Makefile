@@ -219,7 +219,7 @@ else ifeq ($(CORE), CM0P)
 endif
 
 # Additional / custom libraries to link in to the application.
-LDLIBS=
+LDLIBS= -lm
 
 # Linker script selection
 ifeq ($(CORE),CM4)

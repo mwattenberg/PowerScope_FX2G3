@@ -17,6 +17,7 @@
 
 #include "cy_pdl.h"
 #include <string.h>
+#include <math.h>
 #include "app_version.h"
 #include "cybsp.h"
 #include "cy_debug.h"
@@ -29,8 +30,10 @@
 #include "cy_hbdma.h"
 #include "cy_hbdma_mgr.h"
 
-/* Test timing (1 ms for 1000 Hz USB streaming speed) */
-#define TEST_INTERVAL_MS    10
+/* Frame layout: 2-byte sync (0xAA 0xAA) + 8 channels × 2 bytes = 18 bytes per frame.
+ * At HS, each DMA buffer is 512 bytes; pack as many complete frames as fit. */
+#define FRAME_SIZE          18
+#define FRAMES_PER_PACKET   (512 / FRAME_SIZE)   /* 28 frames × 18 = 504 bytes */
 
 /* Global variables associated with High BandWidth DMA setup. */
 cy_stc_hbdma_context_t HBW_DrvCtxt;     /* High BandWidth DMA driver context. */
@@ -56,6 +59,17 @@ cy_stc_debug_config_t dbgCfg = {
     .dbgIntfce = CY_DEBUG_INTFCE_USBFS_CDC,
     .printNow  = true
 };
+
+/* 256-point sine lookup table. Values are uint16, centered at 2048 with amplitude 2000
+ * (range 48..4048), compatible with both int16 and uint16 parsers on the host. */
+static uint16_t sineTable[256];
+
+static void SineTable_Init(void)
+{
+    for (int i = 0; i < 256; i++) {
+        sineTable[i] = (uint16_t)(2048 + (int)(2000.0f * sinf(2.0f * 3.14159265f * i / 256.0f)));
+    }
+}
 
 /* Function prototypes */
 void SetupEp1Dma(void);
@@ -123,6 +137,9 @@ void AppInit(void)
    /* Initial delay to allow peripherals to stabilize */
    Cy_SysLib_Delay(100);
     
+   /* Build sine lookup table */
+   SineTable_Init();
+
    /* Initialize UART and SPI */
    UART_Init();
    SPI_Init();
@@ -144,77 +161,45 @@ int main(void)
    DBG_APP_INFO("=== FX2G3 UART/SPI Test Started ===\r\n");
    Cy_SysLib_Delay(100);
 
-   /* Main test loop */
+   /* Phase accumulators — one per channel. Wrap naturally at 256 (uint8_t overflow).
+    * Different phaseInc values produce distinct frequencies: freq = Fs * inc / 256.
+    * At ~437 kSa/s: inc=1→1.7 kHz, inc=2→3.4 kHz, inc=3→5.1 kHz, inc=5→8.5 kHz,
+    *                inc=7→12 kHz, inc=11→19 kHz, inc=13→22 kHz, inc=17→29 kHz. */
+   static uint8_t phase[8] = {0};
+   static const uint8_t phaseInc[8] = {1, 2, 3, 5, 7, 11, 13, 17};
+
+   /* Main test loop — runs as fast as the DMA pipeline allows. */
    while (1) {
-       DBG_APP_INFO("LOOP_%d\r\n", (int)loopCount);
-        
-       /* Send SPI test pattern - write bytes directly */
-       Cy_SCB_SPI_Write(SPI_HW, 0xAA);
-       Cy_SCB_SPI_Write(SPI_HW, (uint8_t)loopCount & 0xFF);
-        
-       /* Wait for SPI transmission to complete */
-       while (Cy_SCB_SPI_IsBusBusy(SPI_HW)) {
-           /* Wait for SPI to finish */
+       if (loopCount % 100 == 0) {
+           DBG_APP_INFO("LOOP_%d\r\n", (int)loopCount);
        }
 
-       /* Send data over USB if streaming is enabled */
+       /* Send SPI test pattern */
+       Cy_SCB_SPI_Write(SPI_HW, 0xAA);
+       Cy_SCB_SPI_Write(SPI_HW, (uint8_t)loopCount & 0xFF);
+       while (Cy_SCB_SPI_IsBusBusy(SPI_HW)) {}
+
+       /* Pack FRAMES_PER_PACKET frames into one 512-byte USB packet.
+        * Each frame: 2-byte sync 0xAAAA + 8 channels as uint16 LE. */
        if (streamingEnabled && usbConfigured) {
-          /* Construct 8-channel frame with 0xAAAA frame start
-           * Total frame size: 2 bytes frame start + (8 channels * 2 bytes each) = 18 bytes.
-           * Since channels are expected as 16-bit little-endian values,
-           * we can send constant or slowly incrementing patterns for visual confirmation.
-           */
-          uint8_t usb_packet[18];
-           
-          /* Frame start: 0xAAAA (sent as two bytes 0xAA, 0xAA) */
-          usb_packet[0] = 0xAA;
-          usb_packet[1] = 0xAA;
-           
-          /* Channel 0: slow ramp */
-          uint16_t ch0 = (uint16_t)(loopCount & 0xFFFF);
-          usb_packet[2] = (uint8_t)(ch0 & 0xFF);
-          usb_packet[3] = (uint8_t)((ch0 >> 8) & 0xFF);
-           
-          /* Channel 1: square wave */
-          uint16_t ch1 = (uint16_t)((loopCount & 0x10) ? 1000 : 200);
-          usb_packet[4] = (uint8_t)(ch1 & 0xFF);
-          usb_packet[5] = (uint8_t)((ch1 >> 8) & 0xFF);
-           
-          /* Channel 2: slowly incrementing ramp */
-          uint16_t ch2 = (uint16_t)((loopCount / 2) & 0xFFFF);
-          usb_packet[6] = (uint8_t)(ch2 & 0xFF);
-          usb_packet[7] = (uint8_t)((ch2 >> 8) & 0xFF);
-           
-          /* Channel 3: constant 100 */
-          uint16_t ch3 = 100;
-          usb_packet[8] = (uint8_t)(ch3 & 0xFF);
-          usb_packet[9] = (uint8_t)((ch3 >> 8) & 0xFF);
-           
-          /* Channel 4: constant 500 */
-          uint16_t ch4 = 500;
-          usb_packet[10] = (uint8_t)(ch4 & 0xFF);
-          usb_packet[11] = (uint8_t)((ch4 >> 8) & 0xFF);
-           
-          /* Channel 5: constant 1000 */
-          uint16_t ch5 = 1000;
-          usb_packet[12] = (uint8_t)(ch5 & 0xFF);
-          usb_packet[13] = (uint8_t)((ch5 >> 8) & 0xFF);
-           
-          /* Channel 6: constant 2000 */
-          uint16_t ch6 = 2000;
-          usb_packet[14] = (uint8_t)(ch6 & 0xFF);
-          usb_packet[15] = (uint8_t)((ch6 >> 8) & 0xFF);
-           
-          /* Channel 7: constant 4000 */
-          uint16_t ch7 = 4000;
-          usb_packet[16] = (uint8_t)(ch7 & 0xFF);
-          usb_packet[17] = (uint8_t)((ch7 >> 8) & 0xFF);
-           
-          USB_Stream_Write(usb_packet, sizeof(usb_packet));
+           uint8_t usb_packet[512];
+
+           for (int f = 0; f < FRAMES_PER_PACKET; f++) {
+               uint8_t *p = &usb_packet[f * FRAME_SIZE];
+               p[0] = 0xAA;
+               p[1] = 0xAA;
+               for (int ch = 0; ch < 8; ch++) {
+                   uint16_t val = sineTable[phase[ch]];
+                   phase[ch] += phaseInc[ch];
+                   p[2 + ch * 2]     = (uint8_t)(val & 0xFF);
+                   p[2 + ch * 2 + 1] = (uint8_t)(val >> 8);
+               }
+           }
+
+           USB_Stream_Write(usb_packet, sizeof(usb_packet));
        }
-        
+
        loopCount++;
-       Cy_SysLib_Delay(TEST_INTERVAL_MS);
    }
     
    return 0;
@@ -588,7 +573,6 @@ bool USB_Stream_Write(const uint8_t* data, uint32_t length)
                      (ep1InDmaChannel.pContext != NULL) ? "OK" : "NULL",
                      (int)ep1InDmaChannel.type,
                      (int)ep1InDmaChannel.state);
-        Cy_SysLib_Delay(500);
         return false;
     }
     
@@ -618,7 +602,6 @@ bool USB_Stream_Write(const uint8_t* data, uint32_t length)
                      (int)ep1InDmaChannel.type,
                      (int)ep1InDmaChannel.eventEnable,
                      (unsigned)buffStat.count);
-        Cy_SysLib_Delay(500);
         return false;
     }
 
