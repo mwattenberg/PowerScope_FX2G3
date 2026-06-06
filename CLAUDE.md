@@ -7,6 +7,8 @@
 - Firmware with bootloader support for OTA updates via PMODE button
 - Host application (PowerScope) for data visualization and control
 
+**This Repository:** [github.com/mwattenberg/PowerScope_FX2G3](https://github.com/mwattenberg/PowerScope_FX2G3) - Firmware for FX2G3 MCU
+
 **Related Repository:** [PowerScope](https://github.com/mwattenberg/PowerScope) - Host application for Windows/C# that receives and processes streamed data.
 
 ---
@@ -14,7 +16,7 @@
 ## Architecture
 
 ### Firmware (This Repository)
-- **MCU:** EZ-USB FX2G3 (Infineon ARM Cortex-M0+)
+- **MCU:** EZ-USB FX2G3 (Infineon dual-core: ARM Cortex-M0+ + ARM Cortex-M4)
 - **Toolchain:** ModusToolbox v3.5+, GNU Arm Embedded Compiler v14.2.1
 - **Key Components:**
   - USB endpoint for bulk data streaming (custom protocol)
@@ -111,14 +113,37 @@ make program        # Flash firmware to device via OpenOCD
 
 ---
 
-## Key Files & Responsibilities
+## Design Decisions
 
-| File | Purpose | Status |
-|------|---------|--------|
-| `main.c` | Firmware entry point, initialization | ❓ TBD |
-| `cm0_code.c` | Core Cortex-M0+ logic, USB handler | ❓ TBD |
-| `UART/SPI drivers` | Interface to peripherals | ❓ TBD |
-| `USB endpoint implementation` | Bulk streaming, control transfers | ⚠️ **To Implement** |
+### Removed Features
+To keep the codebase clean and focused on core functionality:
+
+1. **USB FS Debug Logging (CDC Interface)**
+   - Removed: Infineon example included USB CDC debug interface
+   - Reason: Cortex-M4 debugger provides superior debugging; USB CDC interface adds unnecessary complexity
+   - Result: Cleaner codebase, faster development
+   - **Note:** `USBFS_LOGS_ENABLE` build flag disabled
+
+2. **ADC Functionality**
+   - Removed: Infineon example included ADC sampling code
+   - Reason: Hardware requirements don't include analog measurements; UART/SPI data streaming is the focus
+   - Result: Simplified peripheral initialization, reduced power consumption
+   - **Note:** ADC clock initialization disabled
+
+### Retained Features
+- **Dual-Core Architecture:** Both M0+ and M4 cores functional (enables real-time processing)
+- **USB Bulk Endpoints:** For streaming UART/SPI data to host
+- **UART Interface:** SCB[1] configured for serial communication input
+- **SPI Interface:** SCB[4] configured as Master for serial device communication
+
+### Peripheral Configuration
+
+| Peripheral | Instance | Mode | Purpose |
+|-----------|----------|------|---------|
+| UART | SCB[1] | Standard UART | Serial data input from external UART devices |
+| SPI | SCB[4] | Master (Motorola) | Serial data input from SPI devices |
+
+See `bsps/TARGET_APP_KIT_FX2G3_104LGA/config/design.modus` for detailed GPIO and clock configuration.
 
 ---
 
@@ -180,17 +205,230 @@ This **must** be registered in the device's USB descriptor. Ensure FX2G3 firmwar
 
 ---
 
-## Quick Commands
+## Build System
+
+### ModusToolbox Make Build
+
+This project uses **ModusToolbox** with a **GNU Make + Ninja** build system. All builds are executed through the `modus-shell` environment.
+
+### Build Commands
+
+From the project root directory (in ModusToolbox modus-shell):
+
+```bash
+# Build firmware (Debug configuration)
+make build
+
+# Build firmware (Release configuration)  
+make build CONFIG=Release
+
+# Program device via OpenOCD
+make program
+
+# Erase device flash
+make erase
+
+# Clean build artifacts
+make clean
+```
+
+### Build Configuration
+
+- **Default Toolchain:** GNU Arm Embedded Compiler v14.2.1 (`GCC_ARM`)
+- **Default Configuration:** Debug
+- **Default Target:** `APP_KIT_FX2G3_104LGA`
+
+### Build Artifacts
+
+Built files are located in: `build/Debug/` or `build/Release/`
+
+Key output files:
+- `mtb-example-fx2g3-hello-world.elf` - Executable firmware
+- `mtb-example-fx2g3-hello-world.hex` - Intel HEX format (for bootloader)
+- `mtb-example-fx2g3-hello-world.bin` - Binary firmware image
+
+### Makefile Configuration
+
+Key build variables in `Makefile`:
+
+```makefile
+USBFS_LOGS_ENABLE=0         # Disable USB CDC logging
+BLOAD_ENABLE=0              # Bootloader disabled for normal operation
+```
+
+To enable bootloader support:
+```bash
+# Edit Makefile: BLOAD_ENABLE=1, then rebuild
+make clean && make build
+```
+
+### ModusToolbox Setup
+
+Required:
+- [ModusToolbox 3.5+](https://www.infineon.com/modustoolbox)
+- Run from **modus-shell** (Windows) or native bash (Linux/macOS)
+- OpenOCD for device programming
+
+---
+
+## USB Interface Implementation (UsbInterface Branch)
+
+### Overview
+
+This section covers custom USB endpoint implementation using WinUSB driver on the FX2G3 chip. The FX2 has a built-in Configurator tool for defining USB descriptors.
+
+### USB Descriptor Components (Using FX2 Configurator)
+
+The FX2 Configurator tool allows configuring the following USB descriptors:
+
+1. **Device Descriptor**
+   - VID/PID (Vendor ID / Product ID)
+   - Device class and version
+   - Max packet size for EP0
+   - Device GUID for WinUSB enumeration
+
+2. **Configuration Descriptor**
+   - Power requirements (bus-powered vs self-powered)
+   - Number of interfaces and alternate settings
+
+3. **Interface Descriptor**
+   - Interface number and alternate settings
+   - Class and subclass codes
+   - String descriptors for human-readable names
+
+4. **Endpoint Descriptors**
+   - **Bulk IN (0x81):** Streaming data from device to host
+     - Purpose: UART/SPI data transmission
+     - Direction: IN (device → host)
+     - Transfer Type: Bulk
+     - Max packet size: **512 bytes (USB HS)** - See throughput analysis below
+   - **Bulk OUT (0x01):** Optional command endpoint (reserve for future use)
+
+5. **String Descriptors**
+   - Device manufacturer, product name, serial number
+   - Interface description
+
+### Debugging USB Descriptors
+
+#### Method 1: Host Enumeration Tools (Recommended for initial debug)
+- **Zadig Tool** (easiest): Shows raw USB descriptor info
+  - Install WinUSB driver automatically
+  - Displays Device GUID and all descriptor information
+  - Free, Windows-only: https://zadig.akeo.ie/
+  
+- **USBTreeView**: Shows full USB device tree and descriptor breakdown
+  - More detailed information than Zadig
+  - https://www.uwe-sieber.de/usbtreeview_e.html
+
+- **Windows Device Manager**: 
+  - Plug device and check `Hardware IDs` property
+  - Verify device is detected correctly
+  - Check for driver assignment (WinUSB)
+
+#### Method 2: Firmware-side Verification
+- Add simple test code to verify descriptor is loaded:
+  ```c
+  // Read descriptor from firmware (verify it was programmed)
+  // Use debugger or serial output to confirm descriptor values
+  ```
+
+#### Method 3: PowerScope Host Application
+- Once descriptors are correct, PowerScope should:
+  1. Enumerate the device
+  2. Find device by GUID
+  3. Open bulk IN endpoint (0x81)
+  4. Begin receiving data (initially test pattern from UART/SPI)
+
+### Implementation Workflow
+
+**Step 1: Define USB Descriptors (Using FX2 Configurator)**
+- Open FX2 Configurator tool
+- Configure Device Descriptor: VID 0x2B2D, PID 0x0001, **USB 2.0 High-Speed**
+- Set Device GUID: `{8D2C9D52-5C6B-4F0B-9F1B-3EBE8C4F9A61}` (WinUSB requirement)
+- Configure Interface with Bulk IN endpoint (0x81, **512 bytes**)
+- Add string descriptors (optional but recommended)
+- Export/generate descriptor code
+
+**Step 2: Firmware Integration**
+- Include generated descriptor code in USB stack initialization
+- Implement USB control transfer handlers (optional, for future commands)
+- Implement bulk IN endpoint interrupt/DMA handler
+- Route UART/SPI data to bulk IN FIFO
+
+**Step 3: Host-side Testing (PowerScope)**
+- Enumerate USB device
+- Verify GUID match
+- Open endpoint 0x81
+- Receive and display test data
+
+**Step 4: Validation**
+- Use Zadig to verify descriptor is recognized by host
+- Verify Device GUID appears correctly
+- Test with PowerScope enumeration code
+
+### USB Descriptor Debugging Checklist
+
+- [ ] Device is detected by Windows Device Manager
+- [ ] Zadig/USBTreeView shows correct VID/PID
+- [ ] Device GUID matches firmware descriptor and PowerScope code
+- [ ] WinUSB driver successfully assigned by Zadig
+- [ ] PowerScope can enumerate device by GUID
+- [ ] PowerScope can open bulk IN endpoint (0x81)
+- [ ] Test data flows from firmware to host (initial UART/SPI test pattern)
+
+### Important: Device GUID for WinUSB
+
+WinUSB drivers require an explicit GUID conveyed via **Microsoft OS 2.0 Descriptors** (BOS descriptor extension), not the standard USB Device Descriptor. The FX2G3 firmware must:
+
+1. Configure GUID via Microsoft OS 2.0 Descriptors (FX2 Configurator handles this)
+2. Use: `{8D2C9D52-5C6B-4F0B-9F1B-3EBE8C4F9A61}`
+3. Ensure PowerScope app searches for this exact GUID
+
+### USB Protocol (Pending Detailed Design)
+
+**Control Transfers (optional, for future enhancement):**
+- `REQ_START (0xA0)` - Begin streaming
+- `REQ_STOP (0xA1)` - Stop streaming
+
+**Bulk IN (0x81) - Data Streaming Format (TBD):**
+- Currently: Test pattern (UART test pattern + SPI test pattern)
+- Future: Timestamp + Channel ID + Sample Data
+
+### Throughput Analysis
+
+**USB HS Specifications:**
+- FX2G3 supports **USB 2.0 High-Speed (480 Mbps)**
+- Bulk IN packet size: **512 bytes** (vs. 64 bytes for Full-Speed)
+- Practical sustained throughput: ~40-50 MB/s (accounting for protocol overhead)
+
+**Data Source Specifications:**
+- **SPI:** 20 Mbps clock → **2.5 MB/s** (8-bit transfers per clock)
+- **UART:** 6 MBaud → **0.75 MB/s** (8-bit transfers)
+- **Combined:** ~3.25 MB/s
+- **Data sources are the bottleneck, not USB**
+
+**PowerScope Streaming Design:**
+- Bulk IN endpoint (0x81) easily handles 2.5 MB/s SPI data
+- 512-byte packets at USB HS: plenty of headroom for timestamps, metadata, multi-channel future expansion
+- No backpressure expected—USB can drain data faster than SPI can generate it
+- Conservative target: **2-3 MB/s** sustained (well within USB HS capability)
+
+---
+
+
 
 ```bash
 # Build firmware
 make build
 
-# Clean build
-make clean
-
-# Flash to device
+# Program to device
 make program
+
+# Erase device
+make erase
+
+# Clean build artifacts
+make clean
 
 # Open workspace in VS Code (optional)
 code FX2G3_RTBox.code-workspace
