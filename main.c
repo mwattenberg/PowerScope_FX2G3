@@ -17,7 +17,6 @@
 
 #include "cy_pdl.h"
 #include <string.h>
-#include <stdio.h>
 #include "app_version.h"
 #include "cybsp.h"
 #include "cy_debug.h"
@@ -45,10 +44,6 @@ cy_stc_hbdma_channel_t ep1InDmaChannel;
 
 volatile bool usbConfigured = false;
 volatile bool streamingEnabled = false;
-
-/* Deferred diagnostics: captured during SetupEp1Dma() and printed once the terminal is open. */
-static cy_en_hbdma_mgr_status_t g_createStatus = (cy_en_hbdma_mgr_status_t)0xDEADBEEF;
-static cy_en_hbdma_mgr_status_t g_enableStatus = (cy_en_hbdma_mgr_status_t)0xDEADBEEF;
 
 /* Debug logging via USBFS CDC (appears as a COM port; driven by cy_debug / CyUsbFsCdc). */
 #define DEBUG_LEVEL  (3u)
@@ -369,8 +364,7 @@ void SetupEp1Dma(void)
     dmaConfig.userCtx      = NULL;
 
     cy_en_hbdma_mgr_status_t create_status = Cy_HBDma_Channel_Create(&HBW_MgrCtxt, &ep1InDmaChannel, &dmaConfig);
-    g_createStatus = create_status;
-    DBG_APP_INFO("[SetupEp1Dma] Cy_HBDma_Channel_Create, status: 0x%x (state: %d)\r\n",
+    DBG_APP_INFO("[SetupEp1Dma] Channel_Create: 0x%x state: %d\r\n",
                  (unsigned int)create_status, (int)ep1InDmaChannel.state);
     
     /* 3. Initialize CPU DMA Interrupt for DW1 channel 1 (IN endpoint 1) */
@@ -383,8 +377,7 @@ void SetupEp1Dma(void)
     
     /* Enable HBDMA Channel */
     cy_en_hbdma_mgr_status_t en_status = Cy_HBDma_Channel_Enable(&ep1InDmaChannel, 0);
-    g_enableStatus = en_status;
-    DBG_APP_INFO("[SetupEp1Dma] Cy_HBDma_Channel_Enable, status: 0x%x\r\n", (unsigned int)en_status);
+    DBG_APP_INFO("[SetupEp1Dma] Channel_Enable: 0x%x\r\n", (unsigned int)en_status);
 }
 
 /**
@@ -394,7 +387,6 @@ void SetupEp1Dma(void)
 void InEpDma_ISR(uint8_t endpNum)
 {
     (void)endpNum;
-    DBG_APP_INFO("[ISR]\r\n");
     Cy_HBDma_Mgr_HandleDW1Interrupt(&HBW_MgrCtxt);
 }
 
@@ -580,17 +572,12 @@ bool USB_Stream_Write(const uint8_t* data, uint32_t length)
 {
     if (!usbConfigured) return false;
 
-    /* One-shot channel-state diagnostic on first call after USB configured. */
-    static bool channelStatePrinted = false;
-    if (!channelStatePrinted) {
-        channelStatePrinted = true;
-        DBG_APP_INFO("[USB] SetupEp1Dma results: create=0x%x enable=0x%x\r\n",
-                     (unsigned int)g_createStatus, (unsigned int)g_enableStatus);
-        DBG_APP_INFO("[USB] chn: pCtx=%s type=%d state=%d nextCons=%u\r\n",
-                     (ep1InDmaChannel.pContext != NULL) ? "OK" : "NULL",
-                     (int)ep1InDmaChannel.type,
-                     (int)ep1InDmaChannel.state,
-                     (unsigned)ep1InDmaChannel.nextConsDscr);
+    /* One-shot log on the first transfer attempt after USB is configured. */
+    static bool startLogged = false;
+    if (!startLogged) {
+        startLogged = true;
+        DBG_APP_INFO("[USB] Streaming started. EP1 IN channel: type=%d state=%d\r\n",
+                     (int)ep1InDmaChannel.type, (int)ep1InDmaChannel.state);
     }
 
     cy_stc_hbdma_buff_status_t buffStat;
@@ -635,21 +622,6 @@ bool USB_Stream_Write(const uint8_t* data, uint32_t length)
         return false;
     }
 
-    /* Diagnostic: log whether DW1 was actually queued, then poll until it completes
-     * or times out. This tells us whether DW1 fires at all. Remove once confirmed working. */
-    {
-        DBG_APP_INFO("[USB] queued=%d dw1intr=0x%x\r\n",
-                     (int)ep1InDmaChannel.egressDWRqtQueued[0],
-                     (unsigned int)Cy_DMA_Channel_GetInterruptStatus(DW1, 1));
-
-        uint32_t timeout = 100000U;
-        while (ep1InDmaChannel.egressDWRqtQueued[0] && timeout--) { }
-        if (ep1InDmaChannel.egressDWRqtQueued[0]) {
-            DBG_APP_INFO("[USB] DW1 STUCK - dw1intr=0x%x dw1stat=0x%x\r\n",
-                         (unsigned int)Cy_DMA_Channel_GetInterruptStatus(DW1, 1),
-                         (unsigned int)Cy_DMA_Channel_GetStatus(DW1, 1));
-        }
-    }
     return true;
 }
 
