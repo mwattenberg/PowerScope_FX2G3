@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include "app_version.h"
 #include "cybsp.h"
+#include "cy_debug.h"
 
 /* USB and HBDMA Headers */
 #include "cy_usb_common.h"
@@ -30,7 +31,7 @@
 #include "cy_hbdma_mgr.h"
 
 /* Test timing (1 ms for 1000 Hz USB streaming speed) */
-#define TEST_INTERVAL_MS    1
+#define TEST_INTERVAL_MS    10
 
 /* Global variables associated with High BandWidth DMA setup. */
 cy_stc_hbdma_context_t HBW_DrvCtxt;     /* High BandWidth DMA driver context. */
@@ -44,6 +45,22 @@ cy_stc_hbdma_channel_t ep1InDmaChannel;
 
 volatile bool usbConfigured = false;
 volatile bool streamingEnabled = false;
+
+/* Deferred diagnostics: captured during SetupEp1Dma() and printed once the terminal is open. */
+static cy_en_hbdma_mgr_status_t g_createStatus = (cy_en_hbdma_mgr_status_t)0xDEADBEEF;
+static cy_en_hbdma_mgr_status_t g_enableStatus = (cy_en_hbdma_mgr_status_t)0xDEADBEEF;
+
+/* Debug logging via USBFS CDC (appears as a COM port; driven by cy_debug / CyUsbFsCdc). */
+#define DEBUG_LEVEL  (3u)
+#define LOGBUF_SIZE  (1024u)
+uint8_t logBuff[LOGBUF_SIZE];
+cy_stc_debug_config_t dbgCfg = {
+    .pBuffer   = logBuff,
+    .traceLvl  = DEBUG_LEVEL,
+    .bufSize   = LOGBUF_SIZE,
+    .dbgIntfce = CY_DEBUG_INTFCE_USBFS_CDC,
+    .printNow  = true
+};
 
 /* Function prototypes */
 void SetupEp1Dma(void);
@@ -61,20 +78,20 @@ void USB_Init(void);
 bool USB_Stream_Write(const uint8_t* data, uint32_t length);
 
 /**
-* \brief Initialize UART (SCB1)
-* Uses device configurator-generated config
+* \brief Initialize application UART (SCB1) for MCU telemetry and the USBFS CDC debug port.
 */
 void UART_Init(void)
 {
-   extern const cy_stc_scb_uart_config_t UART_config;
-    
-   /* Using low-level API, pass NULL for context */
-   Cy_SCB_UART_Init(UART_HW, &UART_config, NULL);
-   Cy_SCB_UART_Enable(UART_HW);
+    extern const cy_stc_scb_uart_config_t UART_config;
+    Cy_SCB_UART_Init(UART_HW, &UART_config, NULL);
+    Cy_SCB_UART_Enable(UART_HW);
+
+    /* Stand up the USBFS CDC debug port (UART_DEBUG / second COM port). */
+    Cy_Debug_LogInit(&dbgCfg);
 }
 
 /**
-* \brief Initialize SPI (SCB4) as Master
+* \brief Initialize SPI (SCB5) as Master
 * Uses device configurator-generated config
 */
 void SPI_Init(void)
@@ -129,23 +146,12 @@ int main(void)
    /* Initialize application */
    AppInit();
     
-   /* Send startup message via UART */
-   const uint8_t startup_msg[] = "=== FX2G3 UART/SPI Test Started ===\r\n";
-   Cy_SCB_UART_PutArrayBlocking(UART_HW, (uint8_t*)startup_msg, sizeof(startup_msg) - 1);
-    
+   DBG_APP_INFO("=== FX2G3 UART/SPI Test Started ===\r\n");
    Cy_SysLib_Delay(100);
-    
+
    /* Main test loop */
    while (1) {
-       
-       /* Send UART test pattern */
-       uint8_t uart_msg[] = "LOOP_";
-       Cy_SCB_UART_PutArrayBlocking(UART_HW, (uint8_t*)uart_msg, sizeof(uart_msg) - 1);
-        
-       /* Send loop count via UART (convert to ASCII) */
-       uint8_t count_str[10];
-       int len = sprintf((char*)count_str, "%ld\r\n", loopCount);
-       Cy_SCB_UART_PutArrayBlocking(UART_HW, count_str, len);
+       DBG_APP_INFO("LOOP_%d\r\n", (int)loopCount);
         
        /* Send SPI test pattern - write bytes directly */
        Cy_SCB_SPI_Write(SPI_HW, 0xAA);
@@ -306,24 +312,18 @@ void SetupEp1Dma(void)
 {
     cy_stc_usb_endp_config_t endpConfig;
     extern void Ep1InDma_ISR(void);
-    char log_buf[128];
 
-    /* Send starting message */
-    Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)"[SetupEp1Dma] Starting EP1 HBDMA setup...\r\n", 43);
+    DBG_APP_INFO("[SetupEp1Dma] Starting EP1 HBDMA setup...\r\n");
 
     if (ep1InDmaChannel.state != CY_HBDMA_CHN_NOT_CONFIGURED) {
-        Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)"[SetupEp1Dma] Existing channel found. Disabling & destroying...\r\n", 65);
-        
+        DBG_APP_INFO("[SetupEp1Dma] Existing channel found. Disabling & destroying...\r\n");
+
         cy_en_hbdma_mgr_status_t dis_status = Cy_HBDma_Channel_Disable(&ep1InDmaChannel);
-        snprintf(log_buf, sizeof(log_buf), "[SetupEp1Dma] Disabling channel, status: 0x%08X\r\n", (unsigned int)dis_status);
-        Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)log_buf, strlen(log_buf));
-        
+        DBG_APP_INFO("[SetupEp1Dma] Disabling channel, status: 0x%x\r\n", (unsigned int)dis_status);
         Cy_SysLib_Delay(1);
-        
+
         cy_en_hbdma_mgr_status_t dest_status = Cy_HBDma_Channel_Destroy(&ep1InDmaChannel);
-        snprintf(log_buf, sizeof(log_buf), "[SetupEp1Dma] Destroying channel, status: 0x%08X\r\n", (unsigned int)dest_status);
-        Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)log_buf, strlen(log_buf));
-        
+        DBG_APP_INFO("[SetupEp1Dma] Destroying channel, status: 0x%x\r\n", (unsigned int)dest_status);
         Cy_SysLib_Delay(1);
     }
     
@@ -335,9 +335,8 @@ void SetupEp1Dma(void)
     /* Packetsize is 512 for High Speed, 64 for Full Speed */
     uint16_t maxPktSize = (Cy_USBD_GetDeviceSpeed(&usbdCtxt) == CY_USBD_USB_DEV_HS) ? 512 : 64;
     
-    snprintf(log_buf, sizeof(log_buf), "[SetupEp1Dma] USB Device Speed: %d, maxPktSize: %u\r\n", 
-             (int)Cy_USBD_GetDeviceSpeed(&usbdCtxt), (unsigned int)maxPktSize);
-    Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)log_buf, strlen(log_buf));
+    DBG_APP_INFO("[SetupEp1Dma] USB Device Speed: %d, maxPktSize: %u\r\n",
+                 (int)Cy_USBD_GetDeviceSpeed(&usbdCtxt), (unsigned int)maxPktSize);
 
     endpConfig.maxPktSize = maxPktSize;
     endpConfig.isoPkts = 0;
@@ -370,9 +369,9 @@ void SetupEp1Dma(void)
     dmaConfig.userCtx      = NULL;
 
     cy_en_hbdma_mgr_status_t create_status = Cy_HBDma_Channel_Create(&HBW_MgrCtxt, &ep1InDmaChannel, &dmaConfig);
-    snprintf(log_buf, sizeof(log_buf), "[SetupEp1Dma] Cy_HBDma_Channel_Create, status: 0x%08X (state: %d)\r\n", 
-             (unsigned int)create_status, (int)ep1InDmaChannel.state);
-    Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)log_buf, strlen(log_buf));
+    g_createStatus = create_status;
+    DBG_APP_INFO("[SetupEp1Dma] Cy_HBDma_Channel_Create, status: 0x%x (state: %d)\r\n",
+                 (unsigned int)create_status, (int)ep1InDmaChannel.state);
     
     /* 3. Initialize CPU DMA Interrupt for DW1 channel 1 (IN endpoint 1) */
     cy_stc_sysint_t intrCfg;
@@ -384,8 +383,8 @@ void SetupEp1Dma(void)
     
     /* Enable HBDMA Channel */
     cy_en_hbdma_mgr_status_t en_status = Cy_HBDma_Channel_Enable(&ep1InDmaChannel, 0);
-    snprintf(log_buf, sizeof(log_buf), "[SetupEp1Dma] Cy_HBDma_Channel_Enable, status: 0x%08X\r\n", (unsigned int)en_status);
-    Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)log_buf, strlen(log_buf));
+    g_enableStatus = en_status;
+    DBG_APP_INFO("[SetupEp1Dma] Cy_HBDma_Channel_Enable, status: 0x%x\r\n", (unsigned int)en_status);
 }
 
 /**
@@ -395,6 +394,7 @@ void SetupEp1Dma(void)
 void InEpDma_ISR(uint8_t endpNum)
 {
     (void)endpNum;
+    DBG_APP_INFO("[ISR]\r\n");
     Cy_HBDma_Mgr_HandleDW1Interrupt(&HBW_MgrCtxt);
 }
 
@@ -540,13 +540,13 @@ void USB_Init(void)
 
     /* Initialize the HBW DMA IP and DMA Manager */
     Cy_HBDma_Init(LVDSSS_LVDS, USB32DEV, &HBW_DrvCtxt, 0, 0);
-    Cy_HBDma_DscrList_Create(&HBW_DscrList, 16U);
+    Cy_HBDma_DscrList_Create(&HBW_DscrList, 32U);
     Cy_HBDma_BufMgr_Create(&HBW_BufMgr, (uint32_t *)0x1C030000UL, 0x10000UL); /* 64KB */
     Cy_HBDma_Mgr_Init(&HBW_MgrCtxt, &HBW_DrvCtxt, &HBW_DscrList, &HBW_BufMgr);
     Cy_HBDma_Mgr_RegisterUsbContext(&HBW_MgrCtxt, &usbdCtxt);
 
     /* Initialize the USBD layer */
-    Cy_USB_USBD_Init(NULL, &usbdCtxt, ((DMAC_Type *)DMAC_BASE), &hsCalCtxt, NUL-L, &HBW_MgrCtxt);
+    Cy_USB_USBD_Init(NULL, &usbdCtxt, ((DMAC_Type *)DMAC_BASE), &hsCalCtxt, NULL, &HBW_MgrCtxt);
 
     /* Enable stall cycles between back-to-back AHB accesses to high bandwidth RAM. */
     MAIN_REG->CTRL = (MAIN_REG->CTRL & 0xF00FFFFFUL) | 0x09900000UL;
@@ -579,39 +579,77 @@ void USB_Init(void)
 bool USB_Stream_Write(const uint8_t* data, uint32_t length)
 {
     if (!usbConfigured) return false;
-    
-    static cy_en_hbdma_mgr_status_t last_get_stat = CY_HBDMA_MGR_SUCCESS;
-    static cy_en_hbdma_mgr_status_t last_commit_stat = CY_HBDMA_MGR_SUCCESS;
-    
+
+    /* One-shot channel-state diagnostic on first call after USB configured. */
+    static bool channelStatePrinted = false;
+    if (!channelStatePrinted) {
+        channelStatePrinted = true;
+        DBG_APP_INFO("[USB] SetupEp1Dma results: create=0x%x enable=0x%x\r\n",
+                     (unsigned int)g_createStatus, (unsigned int)g_enableStatus);
+        DBG_APP_INFO("[USB] chn: pCtx=%s type=%d state=%d nextCons=%u\r\n",
+                     (ep1InDmaChannel.pContext != NULL) ? "OK" : "NULL",
+                     (int)ep1InDmaChannel.type,
+                     (int)ep1InDmaChannel.state,
+                     (unsigned)ep1InDmaChannel.nextConsDscr);
+    }
+
     cy_stc_hbdma_buff_status_t buffStat;
     cy_en_hbdma_mgr_status_t stat = Cy_HBDma_Channel_GetBuffer(&ep1InDmaChannel, &buffStat);
     if (stat != CY_HBDMA_MGR_SUCCESS) {
-        if (stat != last_get_stat) {
-            char log_buf[128];
-            snprintf(log_buf, sizeof(log_buf), "[USB_Stream_Write] GetBuffer failed: 0x%08X\r\n", (unsigned int)stat);
-            Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)log_buf, strlen(log_buf));
-            last_get_stat = stat;
-        }
-        return false; /* No buffer available (backpressure) */
-    }
-    last_get_stat = CY_HBDMA_MGR_SUCCESS;
-    
-    /* Copy data to DMA buffer */
-    uint32_t bytesToCopy = (length < buffStat.size) ? length : buffStat.size;
-    memcpy((uint8_t*)buffStat.pBuffer, data, bytesToCopy);
-    buffStat.count = bytesToCopy;
-    
-    stat = Cy_HBDma_Channel_CommitBuffer(&ep1InDmaChannel, &buffStat);
-    if (stat != CY_HBDMA_MGR_SUCCESS) {
-        if (stat != last_commit_stat) {
-            char log_buf[128];
-            snprintf(log_buf, sizeof(log_buf), "[USB_Stream_Write] CommitBuffer failed: 0x%08X\r\n", (unsigned int)stat);
-            Cy_SCB_UART_PutArrayBlocking(UART_HW, (void *)log_buf, strlen(log_buf));
-            last_commit_stat = stat;
-        }
+        DBG_APP_INFO("[USB] GetBuffer FAIL 0x%x pCtx=%s type=%d state=%d\r\n",
+                     (unsigned int)stat,
+                     (ep1InDmaChannel.pContext != NULL) ? "OK" : "NULL",
+                     (int)ep1InDmaChannel.type,
+                     (int)ep1InDmaChannel.state);
+        Cy_SysLib_Delay(500);
         return false;
     }
-    last_commit_stat = CY_HBDMA_MGR_SUCCESS;
+    
+    /* Copy data to DMA buffer, zero-pad to full size to send a full USB packet.
+     * The host parser uses 0xAA 0xAA sync bytes to find frames, so padding is safe.
+     * Sending full 512-byte packets avoids ambiguity in how the USBHS EPM tracks
+     * the byte count for short packets. */
+    uint32_t bytesToCopy = (length < buffStat.size) ? length : buffStat.size;
+    memcpy((uint8_t*)buffStat.pBuffer, data, bytesToCopy);
+    if (bytesToCopy < buffStat.size) {
+        memset((uint8_t*)buffStat.pBuffer + bytesToCopy, 0, buffStat.size - bytesToCopy);
+    }
+    buffStat.count = buffStat.size;
+
+    /* Reset the DataWire trigger flag before each commit. DW_QueueWrite only asserts
+     * the SW trigger on the first call (egressDWTrigDone flag). On subsequent calls it
+     * expects the USB hardware to re-trigger DW1 via USBHSDEV_TR_OUT16, but that trigger
+     * fires while DW1 is disabled and is permanently lost. Clearing the flag forces the
+     * SW trigger to be asserted on every commit, preventing the DW1 deadlock. */
+    ep1InDmaChannel.egressDWTrigDone[0] = false;
+
+    stat = Cy_HBDma_Channel_CommitBuffer(&ep1InDmaChannel, &buffStat);
+    if (stat != CY_HBDMA_MGR_SUCCESS) {
+        DBG_APP_INFO("[USB] CommitBuffer FAIL 0x%x pCtx=%s type=%d evEn=%d cnt=%u\r\n",
+                     (unsigned int)stat,
+                     (ep1InDmaChannel.pContext != NULL) ? "OK" : "NULL",
+                     (int)ep1InDmaChannel.type,
+                     (int)ep1InDmaChannel.eventEnable,
+                     (unsigned)buffStat.count);
+        Cy_SysLib_Delay(500);
+        return false;
+    }
+
+    /* Diagnostic: log whether DW1 was actually queued, then poll until it completes
+     * or times out. This tells us whether DW1 fires at all. Remove once confirmed working. */
+    {
+        DBG_APP_INFO("[USB] queued=%d dw1intr=0x%x\r\n",
+                     (int)ep1InDmaChannel.egressDWRqtQueued[0],
+                     (unsigned int)Cy_DMA_Channel_GetInterruptStatus(DW1, 1));
+
+        uint32_t timeout = 100000U;
+        while (ep1InDmaChannel.egressDWRqtQueued[0] && timeout--) { }
+        if (ep1InDmaChannel.egressDWRqtQueued[0]) {
+            DBG_APP_INFO("[USB] DW1 STUCK - dw1intr=0x%x dw1stat=0x%x\r\n",
+                         (unsigned int)Cy_DMA_Channel_GetInterruptStatus(DW1, 1),
+                         (unsigned int)Cy_DMA_Channel_GetStatus(DW1, 1));
+        }
+    }
     return true;
 }
 
