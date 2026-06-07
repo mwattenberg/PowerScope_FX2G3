@@ -86,8 +86,8 @@ int main(void)
 
     for (;;)
     {
-		//SerialRelay_Run();
-		DBG_APP_INFO("Hello\r\n");
-		Cy_SysLib_Delay(100);
+		SerialRelay_Run();
+/*		DBG_APP_INFO("Hello\r\n");
+		Cy_SysLib_Delay(100);*/
     }
 }

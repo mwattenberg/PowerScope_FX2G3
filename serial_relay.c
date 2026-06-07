@@ -44,14 +44,31 @@ static void CS_ISR(void)
 {
     Cy_GPIO_ClearInterrupt(SR_CS_PORT, SR_CS_PIN);
 
+    /* Read the CS pin level to distinguish falling edge (CS asserted = transaction
+     * start) from rising edge (CS deasserted = transaction end). The device
+     * configurator fires this ISR on both edges so we handle both here. */
+    bool csHigh = Cy_GPIO_Read(SR_CS_PORT, SR_CS_PIN);
+
     if (activeIface == SR_IFACE_SPI) {
-        uint32_t n = Cy_SCB_SPI_GetNumInRxFifo(SPI_HW);
-        if (n > USB_PACKET_SIZE) n = USB_PACKET_SIZE;
-        if (n > 0U) {
-            Cy_SCB_SPI_ReadArray(SPI_HW, spiIsrBuf, n);
-            memcpy(spiStagingBuf, spiIsrBuf, n);
-            spiRxLen   = n;
-            spiRxReady = true;
+        if (!csHigh) {
+            /* Falling edge: new transaction starting — flush any stale FIFO bytes
+             * left over from a previous overflowed or incomplete transaction. */
+            Cy_SCB_SPI_ClearRxFifo(SPI_HW);
+        } else {
+            /* Rising edge: transaction complete.
+             * Wait for the SCB shift register to flush the last byte into the RX
+             * FIFO — on CPHA0 CS deasserts immediately after the last SCLK edge,
+             * which can race the shift register writeback by a few peripheral clocks. */
+            while (Cy_SCB_SPI_IsBusBusy(SPI_HW)) {}
+
+            uint32_t n = Cy_SCB_SPI_GetNumInRxFifo(SPI_HW);
+            if (n > USB_PACKET_SIZE) n = USB_PACKET_SIZE;
+            if (n > 0U) {
+                Cy_SCB_SPI_ReadArray(SPI_HW, spiIsrBuf, n);
+                memcpy(spiStagingBuf, spiIsrBuf, n);
+                spiRxLen   = n;
+                spiRxReady = true;
+            }
         }
     } else {
         Cy_SCB_SPI_ClearRxFifo(SPI_HW);
@@ -217,4 +234,8 @@ void SerialRelay_Run(void)
             spiRxReady = false;
         }
     }
+
+    /* Yield ~100µs per loop iteration. Without this the CM4 hammers SCB and
+     * DMA registers at full speed, starving the USB stack and SWD debugger. */
+    Cy_SysLib_DelayUs(100U);
 }
