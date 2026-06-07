@@ -80,11 +80,14 @@ static void AppInit(void)
 int main(void)
 {
     AppInit();
+    Cy_SysLib_Delay(500);
     DBG_APP_INFO("=== FX2G3 Serial Relay Started v%u.%u.%u ===\r\n",
                  APP_VERSION_MAJOR, APP_VERSION_MINOR, APP_VERSION_PATCH);
 
     for (;;)
     {
-        SerialRelay_Run();
+		//SerialRelay_Run();
+		DBG_APP_INFO("Hello\r\n");
+		Cy_SysLib_Delay(100);
     }
 }

@@ -171,9 +171,6 @@ void SerialRelay_VendorCmdHandler(cy_stc_usb_usbd_ctxt_t *pUsbdCtxt,
 
 void SerialRelay_Init(void)
 {
-    /* Register CS rising-edge ISR for SPI end-of-transaction detection.
-     * The device configurator has already configured the pin for rising-edge
-     * interrupts; we just wire the IRQ line to CS_ISR here. */
     cy_stc_sysint_t csIrqCfg = { .intrSrc = SR_CS_IRQ, .intrPriority = 5 };
     Cy_SysInt_Init(&csIrqCfg, CS_ISR);
     NVIC_ClearPendingIRQ(SR_CS_IRQ);

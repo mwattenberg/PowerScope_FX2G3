@@ -30,9 +30,9 @@
 #define SR_CS_PIN   LED1_PIN
 #endif
 #ifndef SR_CS_IRQ
-/* LED1_IRQ expands to ioss_interrupts_gpio_4_IRQn which does not exist on
- * CYUSB2318. The correct FX2G3 enumerator uses the _dpslp_ infix. */
-//#define SR_CS_IRQ   ioss_interrupts_gpio_dpslp_4_IRQn
+/* LED1_IRQ from cycfg_pins.h expands to ioss_interrupts_gpio_4_IRQn which does
+ * not exist on CYUSB2318 — the correct DeepSleep-domain enumerator uses _dpslp_.
+ * SerialRelay_Init() muxes this through NvicMux7 automatically. */
 #define SR_CS_IRQ   ioss_interrupts_gpio_dpslp_4_IRQn
 #endif
 
