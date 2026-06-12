@@ -49,7 +49,9 @@ static void Cy_Fx2g3_InitPeripheralClocks(bool adcClkEnable, bool usbfsClkEnable
     }
 
     if (usbfsClkEnable) {
-        Cy_SysClk_PeriphSetDivider(CY_SYSCLK_DIV_16_BIT, 2, 749);
+        /* Target 100 kHz BRS clock: divider = PCLK/100000 - 1 */
+        uint32_t brsDivider = (Cy_SysClk_ClkPeriGetFrequency() / 100000U) - 1U;
+        Cy_SysClk_PeriphSetDivider(CY_SYSCLK_DIV_16_BIT, 2, brsDivider);
         Cy_SysClk_PeriphEnableDivider(CY_SYSCLK_DIV_16_BIT, 2);
         Cy_SysLib_DelayUs(10U);
         Cy_SysClk_PeriphAssignDivider(PCLK_USB_CLOCK_DEV_BRS, CY_SYSCLK_DIV_16_BIT, 2);
@@ -132,6 +134,7 @@ static void SetupEp1Dma(void)
         .intrSrc      = (IRQn_Type)(cpuss_interrupts_dw1_0_IRQn + 1),
     };
     Cy_SysInt_Init(&intrCfg, Ep1InDma_ISR);
+    NVIC_ClearPendingIRQ(intrCfg.intrSrc);
     NVIC_EnableIRQ(intrCfg.intrSrc);
 
     cy_en_hbdma_mgr_status_t en_status = Cy_HBDma_Channel_Enable(&ep1InDmaChannel, 0);
