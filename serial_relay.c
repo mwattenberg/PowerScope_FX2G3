@@ -198,53 +198,39 @@ void SerialRelay_Init(void)
 
 void SerialRelay_Run(void)
 {
-    /* TEST MODE: ignore SPI/UART entirely — send a fixed counter packet at ~100 ms.
-     * This bypasses the CS ISR and all peripheral data paths so we can confirm
-     * USB_Stream_Write works from the main loop context, both before and after the
-     * SPI mode switch vendor command. Remove once USB streaming is verified. */
-    /* Frame: 0xAA 0xAA header + 8 little-endian uint16_t counters (18 bytes).
-     * Counters start at 1,2,...,8 and advance by 1 each frame so PowerScope
-     * shows 8 moving ramp signals. */
-    static uint32_t testLoopCnt  = 0;
-    static uint16_t testBaseVal  = 1;
-    if (++testLoopCnt >= 1000U) {
-        testLoopCnt = 0;
-        if (streamingEnabled && usbConfigured) {
-            uint8_t frame[18];
-            frame[0] = 0xAA;
-            frame[1] = 0xAA;
-            for (uint32_t ch = 0; ch < 8U; ch++) {
-                uint16_t v = (uint16_t)(testBaseVal + ch);
-                frame[2U + 2U * ch]      = (uint8_t)(v & 0xFFU);
-                frame[2U + 2U * ch + 1U] = (uint8_t)(v >> 8);
-            }
-            testBaseVal++;
-            bool ok = USB_Stream_Write(frame, sizeof(frame));
-            DBG_APP_INFO("[SR] TestSend iface=%d ok=%d\r\n",
-                         (int)activeIface, (int)ok);
-        }
-    }
-
-    /* Drain SPI/UART FIFOs to prevent overflow, but do not forward data yet. */
     if (activeIface == SR_IFACE_UART) {
+        /* Accumulate UART RX bytes and forward once the threshold is reached.
+         * The FIFO is drained even when not streaming to prevent overflow. */
         uint32_t rxAvail = Cy_SCB_UART_GetNumInRxFifo(UART_HW);
-        if (rxAvail > 0) {
-            uint8_t  discard[16];
-            uint32_t n = (rxAvail > 16U) ? 16U : rxAvail;
-            Cy_SCB_UART_GetArray(UART_HW, discard, n);
+        if (rxAvail > 0U) {
+            uint32_t space = USB_PACKET_SIZE - uartRxCount;
+            uint32_t n = (rxAvail > space) ? space : rxAvail;
+            Cy_SCB_UART_GetArray(UART_HW, &uartRxBuf[uartRxCount], n);
+            uartRxCount += n;
         }
-        uartRxCount = 0;
-    } else { /* SR_IFACE_SPI */
-        spiRxReady = false;
-    }
 
-    /* Periodically print how often the DW1 ISR fires to gauge USB commit activity. */
-    static uint32_t loopCount = 0;
-    if (++loopCount >= 1000U) {
-        loopCount = 0;
-        uint32_t isrCnt = g_isrFireCount;
-        g_isrFireCount = 0;
-        DBG_APP_INFO("[SR] ISR fires/1000loops=%u\r\n", (unsigned)isrCnt);
+        if (!streamingEnabled || !usbConfigured) {
+            uartRxCount = 0;
+        } else if (uartRxCount >= rxBufThreshold) {
+            if (USB_Stream_Write(uartRxBuf, uartRxCount)) {
+                uartRxCount = 0;
+            }
+            /* On failure (no free DMA buffer) keep the data and retry next
+             * loop; further RX bytes accumulate until the buffer is full. */
+        }
+    } else { /* SR_IFACE_SPI */
+        /* Forward each CS-framed transaction captured by the CS ISR. */
+        if (spiRxReady) {
+            if (streamingEnabled && usbConfigured) {
+                if (USB_Stream_Write(spiStagingBuf, spiRxLen)) {
+                    spiRxReady = false;
+                }
+                /* On failure keep the frame and retry; the CS ISR may
+                 * overwrite it with a newer frame, which is acceptable. */
+            } else {
+                spiRxReady = false;
+            }
+        }
     }
 
     /* Yield ~100µs per loop iteration. Without this the CM4 hammers SCB and

@@ -58,15 +58,15 @@ static void Cy_Fx2g3_InitPeripheralClocks(bool adcClkEnable, bool usbfsClkEnable
     }
 }
 
-volatile uint32_t g_isrFireCount = 0;
-
+/* Empty channel callback. Cy_HBDma_Channel_Create rejects the config with
+ * BAD_PARAM if intrEnable != 0 and no callback is given, so a stub must be
+ * registered even though we need no notifications. NOTE: this runs from the
+ * DW1 ISR (priority 5) — never call DBG_APP_INFO here; printNow=true polls
+ * USBFS which cannot run at that priority, stalling the system. */
 static void HbDma_Callback(cy_stc_hbdma_channel_t *handle, cy_en_hbdma_cb_type_t type,
-                            cy_stc_hbdma_buff_status_t *pbufStat, void *userCtx)
+                           cy_stc_hbdma_buff_status_t *pbufStat, void *userCtx)
 {
     (void)handle; (void)type; (void)pbufStat; (void)userCtx;
-    /* NOTE: this callback runs from the DW1 ISR (priority 5). Never call
-     * DBG_APP_INFO here — printNow=true polls USBFS which runs at lower
-     * priority, causing a deadlock that stalls the main loop. */
 }
 
 /* Overrides the __WEAK empty stub in usbfxstack's dma_isr.c. Must NOT be
@@ -77,7 +77,6 @@ static void HbDma_Callback(cy_stc_hbdma_channel_t *handle, cy_en_hbdma_cb_type_t
 void InEpDma_ISR(uint8_t endpNum)
 {
     (void)endpNum;
-    g_isrFireCount++;
     Cy_HBDma_Mgr_HandleDW1Interrupt(&HBW_MgrCtxt);
 }
 
@@ -308,23 +307,21 @@ void USB_Stream_Init(void)
 
 bool USB_Stream_Write(const uint8_t *data, uint32_t length)
 {
-    if (!usbConfigured) return false;
+    /* Log errors only on the first occurrence of a failure streak. GetBuffer
+     * fails on every call while the host is not draining the endpoint, and
+     * per-call prints at main-loop rate would overflow the debug logger. */
+    static bool errLogged = false;
 
-    static bool startLogged = false;
-    if (!startLogged) {
-        startLogged = true;
-        DBG_APP_INFO("[USB] Streaming started. EP1 IN channel: type=%d state=%d\r\n",
-                     (int)ep1InDmaChannel.type, (int)ep1InDmaChannel.state);
-    }
+    if (!usbConfigured) return false;
 
     cy_stc_hbdma_buff_status_t buffStat;
     cy_en_hbdma_mgr_status_t stat = Cy_HBDma_Channel_GetBuffer(&ep1InDmaChannel, &buffStat);
     if (stat != CY_HBDMA_MGR_SUCCESS) {
-        DBG_APP_INFO("[USB] GetBuffer FAIL 0x%x pCtx=%s type=%d state=%d\r\n",
-                     (unsigned int)stat,
-                     (ep1InDmaChannel.pContext != NULL) ? "OK" : "NULL",
-                     (int)ep1InDmaChannel.type,
-                     (int)ep1InDmaChannel.state);
+        if (!errLogged) {
+            errLogged = true;
+            DBG_APP_INFO("[USB] GetBuffer FAIL 0x%x state=%d\r\n",
+                         (unsigned int)stat, (int)ep1InDmaChannel.state);
+        }
         return false;
     }
 
@@ -332,19 +329,16 @@ bool USB_Stream_Write(const uint8_t *data, uint32_t length)
     memcpy((uint8_t *)buffStat.pBuffer, data, bytesToCopy);
     buffStat.count = bytesToCopy;
 
-    /* Force SW trigger on every commit to avoid DW1 deadlock after first transfer. */
-    ep1InDmaChannel.egressDWTrigDone[0] = false;
-
     stat = Cy_HBDma_Channel_CommitBuffer(&ep1InDmaChannel, &buffStat);
     if (stat != CY_HBDMA_MGR_SUCCESS) {
-        DBG_APP_INFO("[USB] CommitBuffer FAIL 0x%x pCtx=%s type=%d evEn=%d cnt=%u\r\n",
-                     (unsigned int)stat,
-                     (ep1InDmaChannel.pContext != NULL) ? "OK" : "NULL",
-                     (int)ep1InDmaChannel.type,
-                     (int)ep1InDmaChannel.eventEnable,
-                     (unsigned)buffStat.count);
+        if (!errLogged) {
+            errLogged = true;
+            DBG_APP_INFO("[USB] CommitBuffer FAIL 0x%x cnt=%u\r\n",
+                         (unsigned int)stat, (unsigned)buffStat.count);
+        }
         return false;
     }
 
+    errLogged = false;
     return true;
 }

@@ -85,17 +85,8 @@ int main(void)
     DBG_APP_INFO("=== FX2G3 Serial Relay Started v%u.%u.%u ===\r\n",
                  APP_VERSION_MAJOR, APP_VERSION_MINOR, APP_VERSION_PATCH);
 
-	uint16_t counter = 0;
     for (;;)
     {
-		SerialRelay_Run();
-
-		counter++;
-		if(counter == 10000)
-		{
-			DBG_APP_INFO("Main loop\r\n");
-			counter = 0;
-		}
-
+        SerialRelay_Run();
     }
 }
