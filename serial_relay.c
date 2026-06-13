@@ -29,87 +29,75 @@ static uint8_t  uartRxBuf[USB_PACKET_SIZE];
 static uint32_t uartRxCount = 0;
 
 /* SPI receive ring buffer.
- * Single-producer (CS ISR) / single-consumer (SerialRelay_Run) FIFO that
- * decouples frame capture from USB forwarding. The ISR appends each
- * CS-framed transaction; Run() packs the accumulated bytes into full
- * USB_PACKET_SIZE transfers. This replaces the previous single staging
- * buffer, whose one-frame depth silently dropped a sample whenever a new CS
- * edge arrived before the prior frame had been forwarded — the cause of the
- * ~15% loss seen at 5 kHz. SPSC correctness relies on the single Cortex-M4
- * core: the CS ISR (priority 5) runs atomically with respect to the main-loop
- * consumer, and each index is a naturally-aligned 32-bit store. */
-#define SPI_RING_SIZE 4096U  /* power of two; ~50 ms of 5 kHz x 16-byte frames */
+ * Producer / single-consumer (SerialRelay_Run) FIFO that decouples capture
+ * from USB forwarding. Bytes are appended by the SPI RX-FIFO level ISR
+ * (SPI_RX_ISR) and, for the sub-trigger-level tail, by SerialRelay_Run() with
+ * SPI_IRQ masked — the two producers are mutually exclusive, so spiRingHead has
+ * a single writer at any instant. Run() packs the accumulated bytes into full
+ * USB_PACKET_SIZE transfers. Capture is append-only: every received byte is
+ * forwarded in order and the host reassembles fixed-size frames from the byte
+ * stream; resync after a fault is the FIFO flush in FlushRxState(), not per
+ * frame. Each index is a naturally-aligned 32-bit store. */
+#define SPI_RING_SIZE 4096U  /* power of two; ~2 ms of 1.8 MB/s SPI traffic */
 static uint8_t           spiRing[SPI_RING_SIZE];
-static volatile uint32_t spiRingHead = 0;   /* free-running, written by CS ISR */
-static volatile uint32_t spiRingTail = 0;   /* free-running, written by Run()  */
-static uint32_t          spiLastHead = 0;   /* Run()-private: detects producer idle */
+static volatile uint32_t spiRingHead = 0;   /* free-running, written by producer(s) */
+static volatile uint32_t spiRingTail = 0;   /* free-running, written by Run()        */
+static uint32_t          spiLastHead = 0;   /* Run()-private: detects producer idle  */
 static volatile bool     spiOverflow = false;
-static uint8_t spiIsrBuf[USB_PACKET_SIZE];  /* ISR scratch: drains the RX FIFO  */
+static uint8_t spiIsrBuf[USB_PACKET_SIZE];  /* scratch: drains the RX FIFO       */
 static uint8_t spiTxBuf[USB_PACKET_SIZE];   /* Run() scratch: linear USB payload */
 
 /*******************************************************************************
- * CS rising-edge ISR — fires when the SPI master deasserts chip select,
- * signalling end of transmission. Drains whatever bytes landed in the SPI RX
- * FIFO and flags them ready for USB forwarding. No frame interpretation is done.
+ * SPI RX capture — drains the SCB RX FIFO into the ring buffer.
+ *
+ * Driven by the RX-FIFO level interrupt (configured trigger = 63, i.e. fires
+ * once the FIFO holds >=64 bytes) instead of a per-transaction CS edge: at
+ * ~1.8 MB/s that is ~one interrupt per 64 bytes (~28 kHz) rather than one per
+ * 18-byte frame (~100 kHz) — roughly a 4x cut in ISR rate, and it drops the
+ * 1 us/frame settling spin the CS ISR needed. The sub-threshold tail (last
+ * <64 bytes of a burst, or low-rate streams that never reach the trigger) is
+ * drained by SerialRelay_Run() with SPI_IRQ masked.
  ******************************************************************************/
 
-static void CS_ISR(void)
+/* Append all bytes currently in the SPI RX FIFO to the ring. The caller must
+ * guarantee mutual exclusion with the other producer: the ISR runs atomically
+ * with respect to the main loop, and Run() masks SPI_IRQ around its call, so
+ * spiRingHead is only ever advanced from one context at a time. spiRingTail is
+ * owned by Run(); a slightly stale read here only under-reports free space,
+ * which is conservative and safe. */
+static void SpiDrainFifoToRing(void)
 {
-    Cy_GPIO_ClearInterrupt(SR_CS_PORT, SR_CS_PIN);
+    uint32_t n = Cy_SCB_SPI_GetNumInRxFifo(SPI_HW);
+    if (n == 0U) return;
+    if (n > USB_PACKET_SIZE) n = USB_PACKET_SIZE;
+    Cy_SCB_SPI_ReadArray(SPI_HW, spiIsrBuf, n);
 
-    /* Read the CS pin level to distinguish falling edge (CS asserted = transaction
-     * start) from rising edge (CS deasserted = transaction end). The device
-     * configurator fires this ISR on both edges so we handle both here. */
-    bool csHigh = Cy_GPIO_Read(SR_CS_PORT, SR_CS_PIN);
+    uint32_t used      = spiRingHead - spiRingTail;
+    uint32_t freeSpace = SPI_RING_SIZE - used;
+    if (n > freeSpace) {
+        /* Ring full: Run()/host not draining fast enough. Drop these bytes
+         * rather than corrupt the byte stream, and latch it for logging. */
+        spiOverflow = true;
+        return;
+    }
 
-    if (activeIface == SR_IFACE_SPI) {
-        if (!csHigh) {
-            /* Falling edge: new transaction starting. Do NOT clear the RX FIFO
-             * here. The falling edge coincides with the master starting to clock
-             * data, so a clear that is delayed (even a few µs, e.g. by the
-             * priority-4 USB ISR) wipes the first byte(s) of the current frame —
-             * the host then sees a short frame and drops the sample. Capture is
-             * append-only: every byte the SCB receives is forwarded, and the
-             * host reassembles fixed-size frames from the byte stream. A delayed
-             * rising edge merely concatenates two frames in the FIFO, which
-             * decode correctly downstream. Resync after a genuine fault is
-             * handled by the explicit FIFO flush in FlushRxState() (START/STOP
-             * /interface-switch), not per-frame. */
-        } else {
-            /* Rising edge: transaction complete.
-             * The shift register needs a few peripheral clocks after the last SCLK
-             * edge to latch the final byte into the RX FIFO.  A fixed NOP delay is
-             * sufficient and avoids an unbounded spin that would block the main loop
-             * if the SPI clock stopped (e.g. master enabled the SCB mid-transaction). */
-            Cy_SysLib_DelayUs(1U);
+    uint32_t head       = spiRingHead & (SPI_RING_SIZE - 1U);
+    uint32_t firstChunk = SPI_RING_SIZE - head;
+    if (firstChunk > n) firstChunk = n;
+    memcpy(&spiRing[head], spiIsrBuf, firstChunk);
+    if (n > firstChunk)
+        memcpy(&spiRing[0], &spiIsrBuf[firstChunk], n - firstChunk);
+    spiRingHead += n;  /* publish after the data is in place */
+}
 
-            uint32_t n = Cy_SCB_SPI_GetNumInRxFifo(SPI_HW);
-            if (n > USB_PACKET_SIZE) n = USB_PACKET_SIZE;
-            if (n > 0U) {
-                Cy_SCB_SPI_ReadArray(SPI_HW, spiIsrBuf, n);
-
-                /* Append the frame to the ring. spiRingTail is owned by Run();
-                 * reading a slightly stale value here only under-reports free
-                 * space, which is safe (conservative). */
-                uint32_t used      = spiRingHead - spiRingTail;
-                uint32_t freeSpace = SPI_RING_SIZE - used;
-                if (n > freeSpace) {
-                    /* Ring full: Run()/host not draining fast enough. Drop this
-                     * frame rather than corrupt the byte stream, and latch it. */
-                    spiOverflow = true;
-                } else {
-                    uint32_t head       = spiRingHead & (SPI_RING_SIZE - 1U);
-                    uint32_t firstChunk = SPI_RING_SIZE - head;
-                    if (firstChunk > n) firstChunk = n;
-                    memcpy(&spiRing[head], spiIsrBuf, firstChunk);
-                    if (n > firstChunk)
-                        memcpy(&spiRing[0], &spiIsrBuf[firstChunk], n - firstChunk);
-                    spiRingHead += n;  /* publish after the data is in place */
-                }
-            }
-        }
-    } else {
-        Cy_SCB_SPI_ClearRxFifo(SPI_HW);
+/* SPI RX-FIFO level ISR (SCB5). Drains the FIFO, then clears the level cause;
+ * because the FIFO is emptied first it drops below the trigger and the cause
+ * does not immediately re-assert. */
+static void SPI_RX_ISR(void)
+{
+    if (Cy_SCB_GetRxInterruptStatusMasked(SPI_HW) & CY_SCB_RX_INTR_LEVEL) {
+        SpiDrainFifoToRing();
+        Cy_SCB_ClearRxInterrupt(SPI_HW, CY_SCB_RX_INTR_LEVEL);
     }
 }
 
@@ -131,6 +119,7 @@ static void FlushRxState(void)
      * switch context, not racing a live transaction. */
     if (activeIface == SR_IFACE_SPI) {
         Cy_SCB_SPI_ClearRxFifo(SPI_HW);
+        Cy_SCB_ClearRxInterrupt(SPI_HW, CY_SCB_RX_INTR_LEVEL);
     }
 }
 
@@ -236,10 +225,15 @@ void SerialRelay_VendorCmdHandler(cy_stc_usb_usbd_ctxt_t *pUsbdCtxt,
 
 void SerialRelay_Init(void)
 {
-    cy_stc_sysint_t csIrqCfg = { .intrSrc = SR_CS_IRQ, .intrPriority = 5 };
-    Cy_SysInt_Init(&csIrqCfg, CS_ISR);
-    NVIC_ClearPendingIRQ(SR_CS_IRQ);
-    NVIC_EnableIRQ(SR_CS_IRQ);
+    /* SPI RX path is interrupt-driven off the SCB RX-FIFO level (trigger 63,
+     * enabled in SPI_config.rxFifoIntEnableMask, applied by Cy_SCB_SPI_Init).
+     * Here we only vector and enable the NVIC line. The interrupt cannot fire
+     * until SPI is enabled (SwitchInterface), so enabling it unconditionally is
+     * safe — UART mode never clocks the SPI RX FIFO. */
+    cy_stc_sysint_t spiIrqCfg = { .intrSrc = SPI_IRQ, .intrPriority = 5 };
+    Cy_SysInt_Init(&spiIrqCfg, SPI_RX_ISR);
+    NVIC_ClearPendingIRQ(SPI_IRQ);
+    NVIC_EnableIRQ(SPI_IRQ);
 
     USB_Stream_RegisterVendorCallback(SerialRelay_VendorCmdHandler);
 }
@@ -277,43 +271,45 @@ void SerialRelay_Run(void)
             spiRingTail = spiRingHead;
             spiLastHead = spiRingHead;
         } else {
+            /* Drain the sub-trigger-level tail the level ISR leaves behind
+             * (last <64 bytes of a burst, or low-rate streams that never reach
+             * the trigger). Mask SPI_IRQ so this never races the ISR on the FIFO
+             * or on spiRingHead; a level event raised while masked stays pending
+             * and runs on re-enable. */
+            NVIC_DisableIRQ(SPI_IRQ);
+            SpiDrainFifoToRing();
+            NVIC_EnableIRQ(SPI_IRQ);
+
             uint32_t head = spiRingHead;            /* single snapshot */
-
-            /* Burst-drain every full packet available this iteration instead of
-             * one-per-loop. After a host stall the ring holds several packets;
-             * forwarding them back-to-back within a single 100µs tick clears the
-             * backlog quickly rather than bleeding it off at 512 B / 100µs — the
-             * slow drain that previously let the ring overflow and drop frames.
-             * Stops on the first USB_Stream_Write failure (no free DMA buffer =
-             * host back-pressure); those bytes stay in the ring, retried next loop. */
-            while ((head - spiRingTail) >= USB_PACKET_SIZE) {
-                uint32_t tailIdx    = spiRingTail & (SPI_RING_SIZE - 1U);
-                uint32_t firstChunk = SPI_RING_SIZE - tailIdx;
-                if (firstChunk > USB_PACKET_SIZE) firstChunk = USB_PACKET_SIZE;
-                memcpy(spiTxBuf, &spiRing[tailIdx], firstChunk);
-                if (USB_PACKET_SIZE > firstChunk)
-                    memcpy(&spiTxBuf[firstChunk], &spiRing[0], USB_PACKET_SIZE - firstChunk);
-
-                if (!USB_Stream_Write(spiTxBuf, USB_PACKET_SIZE))
-                    break;
-                spiRingTail += USB_PACKET_SIZE;  /* release the slots */
-            }
-
-            /* Forward a trailing partial packet once the producer has gone quiet
-             * (head unchanged since last iteration) so low-rate streams aren't
-             * stuck waiting for a full packet to accumulate. */
             uint32_t used = head - spiRingTail;
-            if (used > 0U && head == spiLastHead) {
+
+            /* Forward at most ONE USB buffer per loop iteration. Committing
+             * several buffers back-to-back within a single iteration (the former
+             * burst-drain) duplicated data on the wire under back-pressure: the
+             * HBDMA consume path needs the per-iteration 100µs yield between
+             * commits, and without it the channel re-transmits — inflating
+             * throughput (~2.2x observed) until the host is overwhelmed and the
+             * stream collapses. One 512 B commit per ~100µs still sustains
+             * ~5 MB/s, far above the SPI input rate, so a single flush is both
+             * clean and sufficient. Send a full packet when one is available;
+             * otherwise flush a partial once the producer has gone quiet for a
+             * loop iteration (bounds latency for low-rate streams). */
+            bool flush = (used >= USB_PACKET_SIZE) ||
+                         (used > 0U && head == spiLastHead);
+            if (flush) {
+                uint32_t toSend     = (used > USB_PACKET_SIZE) ? USB_PACKET_SIZE : used;
                 uint32_t tailIdx    = spiRingTail & (SPI_RING_SIZE - 1U);
                 uint32_t firstChunk = SPI_RING_SIZE - tailIdx;
-                if (firstChunk > used) firstChunk = used;
+                if (firstChunk > toSend) firstChunk = toSend;
                 memcpy(spiTxBuf, &spiRing[tailIdx], firstChunk);
-                if (used > firstChunk)
-                    memcpy(&spiTxBuf[firstChunk], &spiRing[0], used - firstChunk);
+                if (toSend > firstChunk)
+                    memcpy(&spiTxBuf[firstChunk], &spiRing[0], toSend - firstChunk);
 
-                if (USB_Stream_Write(spiTxBuf, used)) {
-                    spiRingTail += used;  /* release the slots */
+                if (USB_Stream_Write(spiTxBuf, toSend)) {
+                    spiRingTail += toSend;  /* release the slots */
                 }
+                /* On USB failure keep the bytes; the ring retains them and we
+                 * retry next loop with no data loss. */
             }
             spiLastHead = head;
         }
@@ -321,7 +317,7 @@ void SerialRelay_Run(void)
 
     /* Yield ~100µs per loop iteration. Without this the CM4 hammers SCB and
      * DMA registers at full speed, starving the USB stack and SWD debugger.
-     * The burst-drain loop above already clears any SPI backlog within a single
-     * tick, so a backlog no longer needs the loop to spin faster than this. */
+     * It also paces USB buffer commits: the HBDMA consume path duplicates data
+     * if buffers are committed back-to-back without this gap (see SPI flush). */
     Cy_SysLib_DelayUs(100U);
 }

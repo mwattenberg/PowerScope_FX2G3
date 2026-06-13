@@ -118,8 +118,13 @@ static void SetupEp1Dma(void)
 
     cy_stc_hbdma_chn_config_t dmaConfig;
     memset(&dmaConfig, 0, sizeof(dmaConfig));
-    dmaConfig.size          = maxPktSize;
-    dmaConfig.prodBufSize   = maxPktSize;
+    /* DMA buffer is USB_PACKET_SIZE (a multiple of the wire packet); the USB
+     * block fragments each buffer into usbMaxPktSize (= maxPktSize) packets on
+     * the wire. Larger buffers amortise the per-commit HBDMA cost over more
+     * bytes, so one commit per main-loop tick moves several packets — raising
+     * drain throughput without committing buffers back-to-back. */
+    dmaConfig.size          = USB_PACKET_SIZE;
+    dmaConfig.prodBufSize   = USB_PACKET_SIZE;
     dmaConfig.count         = 8;
     dmaConfig.prodHdrSize   = 0;
     dmaConfig.eventEnable   = 0;
