@@ -20,8 +20,14 @@
 #include "cy_usb_common.h"
 #include "cy_usb_usbd.h"
 
-/* Maximum payload per USB bulk transfer at High Speed. */
-#define USB_PACKET_SIZE  512U
+/* Size of each EP1-IN DMA buffer / relay commit chunk. A multiple of the 512 B
+ * HS bulk wire packet (the wire packet is set separately as usbMaxPktSize /
+ * endpoint maxPktSize in usb_stream.c): the USB block fragments one buffer into
+ * that many wire packets. Larger buffers amortise the HBDMA GetBuffer/
+ * CommitBuffer cost over more bytes, raising drain throughput WITHOUT committing
+ * buffers back-to-back (which the HBDMA path duplicates — see serial_relay.c).
+ * 2048 = 4 wire packets. With count=8 the pool use is 16 KB of the 64 KB. */
+#define USB_PACKET_SIZE  2048U
 
 /* Callback type for unhandled vendor control requests.
  * The USB layer calls this for any vendor bRequest not handled internally.
