@@ -28,11 +28,24 @@ static volatile uint32_t rxBufThreshold = USB_PACKET_SIZE;
 static uint8_t  uartRxBuf[USB_PACKET_SIZE];
 static uint32_t uartRxCount = 0;
 
-/* SPI receive state — written by CS ISR, consumed by Run() */
-static volatile bool     spiRxReady = false;
-static volatile uint32_t spiRxLen   = 0;
-static uint8_t spiStagingBuf[USB_PACKET_SIZE];
-static uint8_t spiIsrBuf[USB_PACKET_SIZE];
+/* SPI receive ring buffer.
+ * Single-producer (CS ISR) / single-consumer (SerialRelay_Run) FIFO that
+ * decouples frame capture from USB forwarding. The ISR appends each
+ * CS-framed transaction; Run() packs the accumulated bytes into full
+ * USB_PACKET_SIZE transfers. This replaces the previous single staging
+ * buffer, whose one-frame depth silently dropped a sample whenever a new CS
+ * edge arrived before the prior frame had been forwarded — the cause of the
+ * ~15% loss seen at 5 kHz. SPSC correctness relies on the single Cortex-M4
+ * core: the CS ISR (priority 5) runs atomically with respect to the main-loop
+ * consumer, and each index is a naturally-aligned 32-bit store. */
+#define SPI_RING_SIZE 4096U  /* power of two; ~50 ms of 5 kHz x 16-byte frames */
+static uint8_t           spiRing[SPI_RING_SIZE];
+static volatile uint32_t spiRingHead = 0;   /* free-running, written by CS ISR */
+static volatile uint32_t spiRingTail = 0;   /* free-running, written by Run()  */
+static uint32_t          spiLastHead = 0;   /* Run()-private: detects producer idle */
+static volatile bool     spiOverflow = false;
+static uint8_t spiIsrBuf[USB_PACKET_SIZE];  /* ISR scratch: drains the RX FIFO  */
+static uint8_t spiTxBuf[USB_PACKET_SIZE];   /* Run() scratch: linear USB payload */
 
 /*******************************************************************************
  * CS rising-edge ISR — fires when the SPI master deasserts chip select,
@@ -51,9 +64,17 @@ static void CS_ISR(void)
 
     if (activeIface == SR_IFACE_SPI) {
         if (!csHigh) {
-            /* Falling edge: new transaction starting — flush any stale FIFO bytes
-             * left over from a previous overflowed or incomplete transaction. */
-            Cy_SCB_SPI_ClearRxFifo(SPI_HW);
+            /* Falling edge: new transaction starting. Do NOT clear the RX FIFO
+             * here. The falling edge coincides with the master starting to clock
+             * data, so a clear that is delayed (even a few µs, e.g. by the
+             * priority-4 USB ISR) wipes the first byte(s) of the current frame —
+             * the host then sees a short frame and drops the sample. Capture is
+             * append-only: every byte the SCB receives is forwarded, and the
+             * host reassembles fixed-size frames from the byte stream. A delayed
+             * rising edge merely concatenates two frames in the FIFO, which
+             * decode correctly downstream. Resync after a genuine fault is
+             * handled by the explicit FIFO flush in FlushRxState() (START/STOP
+             * /interface-switch), not per-frame. */
         } else {
             /* Rising edge: transaction complete.
              * The shift register needs a few peripheral clocks after the last SCLK
@@ -66,9 +87,25 @@ static void CS_ISR(void)
             if (n > USB_PACKET_SIZE) n = USB_PACKET_SIZE;
             if (n > 0U) {
                 Cy_SCB_SPI_ReadArray(SPI_HW, spiIsrBuf, n);
-                memcpy(spiStagingBuf, spiIsrBuf, n);
-                spiRxLen   = n;
-                spiRxReady = true;
+
+                /* Append the frame to the ring. spiRingTail is owned by Run();
+                 * reading a slightly stale value here only under-reports free
+                 * space, which is safe (conservative). */
+                uint32_t used      = spiRingHead - spiRingTail;
+                uint32_t freeSpace = SPI_RING_SIZE - used;
+                if (n > freeSpace) {
+                    /* Ring full: Run()/host not draining fast enough. Drop this
+                     * frame rather than corrupt the byte stream, and latch it. */
+                    spiOverflow = true;
+                } else {
+                    uint32_t head       = spiRingHead & (SPI_RING_SIZE - 1U);
+                    uint32_t firstChunk = SPI_RING_SIZE - head;
+                    if (firstChunk > n) firstChunk = n;
+                    memcpy(&spiRing[head], spiIsrBuf, firstChunk);
+                    if (n > firstChunk)
+                        memcpy(&spiRing[0], &spiIsrBuf[firstChunk], n - firstChunk);
+                    spiRingHead += n;  /* publish after the data is in place */
+                }
             }
         }
     } else {
@@ -83,7 +120,18 @@ static void CS_ISR(void)
 static void FlushRxState(void)
 {
     uartRxCount = 0;
-    spiRxReady  = false;
+    spiRingHead = 0;
+    spiRingTail = 0;
+    spiLastHead = 0;
+    spiOverflow = false;
+
+    /* Deliberate resync point (START/STOP/interface-switch only, never mid-
+     * stream): discard any stale or partial bytes so the next frame starts
+     * FIFO-aligned. Safe here because this runs from the priority-4 vendor/
+     * switch context, not racing a live transaction. */
+    if (activeIface == SR_IFACE_SPI) {
+        Cy_SCB_SPI_ClearRxFifo(SPI_HW);
+    }
 }
 
 static void SwitchInterface(sr_iface_t iface)
@@ -219,17 +267,40 @@ void SerialRelay_Run(void)
              * loop; further RX bytes accumulate until the buffer is full. */
         }
     } else { /* SR_IFACE_SPI */
-        /* Forward each CS-framed transaction captured by the CS ISR. */
-        if (spiRxReady) {
-            if (streamingEnabled && usbConfigured) {
-                if (USB_Stream_Write(spiStagingBuf, spiRxLen)) {
-                    spiRxReady = false;
+        if (spiOverflow) {
+            spiOverflow = false;
+            DBG_APP_INFO("[SR] SPI ring overflow — frames dropped (not draining)\r\n");
+        }
+
+        if (!streamingEnabled || !usbConfigured) {
+            /* Discard whatever was captured while not streaming. */
+            spiRingTail = spiRingHead;
+            spiLastHead = spiRingHead;
+        } else {
+            uint32_t head = spiRingHead;            /* single snapshot */
+            uint32_t used = head - spiRingTail;
+
+            /* Forward a full packet as soon as one is available (throughput);
+             * forward a partial packet once the producer has gone quiet for a
+             * loop iteration (bounds latency for low-rate streams). */
+            bool flush = (used >= USB_PACKET_SIZE) ||
+                         (used > 0U && head == spiLastHead);
+            if (flush) {
+                uint32_t toSend     = (used > USB_PACKET_SIZE) ? USB_PACKET_SIZE : used;
+                uint32_t tailIdx    = spiRingTail & (SPI_RING_SIZE - 1U);
+                uint32_t firstChunk = SPI_RING_SIZE - tailIdx;
+                if (firstChunk > toSend) firstChunk = toSend;
+                memcpy(spiTxBuf, &spiRing[tailIdx], firstChunk);
+                if (toSend > firstChunk)
+                    memcpy(&spiTxBuf[firstChunk], &spiRing[0], toSend - firstChunk);
+
+                if (USB_Stream_Write(spiTxBuf, toSend)) {
+                    spiRingTail += toSend;  /* release the slots */
                 }
-                /* On failure keep the frame and retry; the CS ISR may
-                 * overwrite it with a newer frame, which is acceptable. */
-            } else {
-                spiRxReady = false;
+                /* On USB failure keep the bytes; the ring retains them and we
+                 * retry next loop with no data loss. */
             }
+            spiLastHead = head;
         }
     }
 
