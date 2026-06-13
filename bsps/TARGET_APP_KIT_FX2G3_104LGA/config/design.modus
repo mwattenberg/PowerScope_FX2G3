@@ -43,7 +43,7 @@
                         <Param id="driveStrengthTrim" value="CY_GPIO_DRIVE_STRENGTH_DEFAULT"/>
                         <Param id="inFlash" value="true"/>
                         <Param id="initialState" value="1"/>
-                        <Param id="isrTrigger" value="CY_GPIO_INTR_BOTH"/>
+                        <Param id="isrTrigger" value="CY_GPIO_INTR_RISING"/>
                         <Param id="nonSec" value="1"/>
                         <Param id="pullUpRes" value="CY_GPIO_PULLUP_RES_DISABLE"/>
                         <Param id="sioOutputBuffer" value="true"/>
@@ -319,7 +319,7 @@
                     <Block location="peri[0].div_8[1]" locked="true"/>
                     <Parameters>
                         <Param id="fracDivider" value="0"/>
-                        <Param id="intDivider" value="11"/>
+                        <Param id="intDivider" value="1"/>
                         <Param id="startOnReset" value="true"/>
                     </Parameters>
                 </Personality>
@@ -535,7 +535,7 @@
                     <Parameters>
                         <Param id="ApiMode" value="LOW_LEVEL"/>
                         <Param id="BitsOrder" value="MSB_FIRST"/>
-                        <Param id="DataRate" value="1000"/>
+                        <Param id="DataRate" value="25000"/>
                         <Param id="DeassertSelectLine" value="false"/>
                         <Param id="DropOnParityError" value="false"/>
                         <Param id="EnableFreeRunSclk" value="false"/>
@@ -548,7 +548,7 @@
                         <Param id="IntrRxFull" value="false"/>
                         <Param id="IntrRxNotEmpty" value="false"/>
                         <Param id="IntrRxOverflow" value="false"/>
-                        <Param id="IntrRxTrigger" value="false"/>
+                        <Param id="IntrRxTrigger" value="true"/>
                         <Param id="IntrRxUnderflow" value="false"/>
                         <Param id="IntrSlaveBusError" value="false"/>
                         <Param id="IntrTxEmpty" value="false"/>

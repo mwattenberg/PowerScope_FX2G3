@@ -278,33 +278,50 @@ void SerialRelay_Run(void)
             spiLastHead = spiRingHead;
         } else {
             uint32_t head = spiRingHead;            /* single snapshot */
-            uint32_t used = head - spiRingTail;
 
-            /* Forward a full packet as soon as one is available (throughput);
-             * forward a partial packet once the producer has gone quiet for a
-             * loop iteration (bounds latency for low-rate streams). */
-            bool flush = (used >= USB_PACKET_SIZE) ||
-                         (used > 0U && head == spiLastHead);
-            if (flush) {
-                uint32_t toSend     = (used > USB_PACKET_SIZE) ? USB_PACKET_SIZE : used;
+            /* Burst-drain every full packet available this iteration instead of
+             * one-per-loop. After a host stall the ring holds several packets;
+             * forwarding them back-to-back within a single 100µs tick clears the
+             * backlog quickly rather than bleeding it off at 512 B / 100µs — the
+             * slow drain that previously let the ring overflow and drop frames.
+             * Stops on the first USB_Stream_Write failure (no free DMA buffer =
+             * host back-pressure); those bytes stay in the ring, retried next loop. */
+            while ((head - spiRingTail) >= USB_PACKET_SIZE) {
                 uint32_t tailIdx    = spiRingTail & (SPI_RING_SIZE - 1U);
                 uint32_t firstChunk = SPI_RING_SIZE - tailIdx;
-                if (firstChunk > toSend) firstChunk = toSend;
+                if (firstChunk > USB_PACKET_SIZE) firstChunk = USB_PACKET_SIZE;
                 memcpy(spiTxBuf, &spiRing[tailIdx], firstChunk);
-                if (toSend > firstChunk)
-                    memcpy(&spiTxBuf[firstChunk], &spiRing[0], toSend - firstChunk);
+                if (USB_PACKET_SIZE > firstChunk)
+                    memcpy(&spiTxBuf[firstChunk], &spiRing[0], USB_PACKET_SIZE - firstChunk);
 
-                if (USB_Stream_Write(spiTxBuf, toSend)) {
-                    spiRingTail += toSend;  /* release the slots */
+                if (!USB_Stream_Write(spiTxBuf, USB_PACKET_SIZE))
+                    break;
+                spiRingTail += USB_PACKET_SIZE;  /* release the slots */
+            }
+
+            /* Forward a trailing partial packet once the producer has gone quiet
+             * (head unchanged since last iteration) so low-rate streams aren't
+             * stuck waiting for a full packet to accumulate. */
+            uint32_t used = head - spiRingTail;
+            if (used > 0U && head == spiLastHead) {
+                uint32_t tailIdx    = spiRingTail & (SPI_RING_SIZE - 1U);
+                uint32_t firstChunk = SPI_RING_SIZE - tailIdx;
+                if (firstChunk > used) firstChunk = used;
+                memcpy(spiTxBuf, &spiRing[tailIdx], firstChunk);
+                if (used > firstChunk)
+                    memcpy(&spiTxBuf[firstChunk], &spiRing[0], used - firstChunk);
+
+                if (USB_Stream_Write(spiTxBuf, used)) {
+                    spiRingTail += used;  /* release the slots */
                 }
-                /* On USB failure keep the bytes; the ring retains them and we
-                 * retry next loop with no data loss. */
             }
             spiLastHead = head;
         }
     }
 
     /* Yield ~100µs per loop iteration. Without this the CM4 hammers SCB and
-     * DMA registers at full speed, starving the USB stack and SWD debugger. */
+     * DMA registers at full speed, starving the USB stack and SWD debugger.
+     * The burst-drain loop above already clears any SPI backlog within a single
+     * tick, so a backlog no longer needs the loop to spin faster than this. */
     Cy_SysLib_DelayUs(100U);
 }

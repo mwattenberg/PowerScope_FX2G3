@@ -120,7 +120,7 @@ static void SetupEp1Dma(void)
     memset(&dmaConfig, 0, sizeof(dmaConfig));
     dmaConfig.size          = maxPktSize;
     dmaConfig.prodBufSize   = maxPktSize;
-    dmaConfig.count         = 4;
+    dmaConfig.count         = 8;
     dmaConfig.prodHdrSize   = 0;
     dmaConfig.eventEnable   = 0;
     dmaConfig.intrEnable    = LVDSSS_LVDS_ADAPTER_DMA_SCK_INTR_CONSUME_EVENT_Msk;
