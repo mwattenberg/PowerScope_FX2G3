@@ -18,7 +18,7 @@
                         </Aliases>
                     </Block>
                     <Parameters>
-                        <Param id="DriveModes" value="CY_GPIO_DM_STRONG_IN_OFF"/>
+                        <Param id="DriveModes" value="CY_GPIO_DM_HIGHZ"/>
                         <Param id="driveStrength" value="CY_GPIO_DRIVE_1_2"/>
                         <Param id="driveStrengthTrim" value="CY_GPIO_DRIVE_STRENGTH_DEFAULT"/>
                         <Param id="inFlash" value="true"/>
@@ -38,12 +38,12 @@
                         </Aliases>
                     </Block>
                     <Parameters>
-                        <Param id="DriveModes" value="CY_GPIO_DM_STRONG_IN_OFF"/>
+                        <Param id="DriveModes" value="CY_GPIO_DM_HIGHZ"/>
                         <Param id="driveStrength" value="CY_GPIO_DRIVE_1_2"/>
                         <Param id="driveStrengthTrim" value="CY_GPIO_DRIVE_STRENGTH_DEFAULT"/>
                         <Param id="inFlash" value="true"/>
                         <Param id="initialState" value="1"/>
-                        <Param id="isrTrigger" value="CY_GPIO_INTR_DISABLE"/>
+                        <Param id="isrTrigger" value="CY_GPIO_INTR_BOTH"/>
                         <Param id="nonSec" value="1"/>
                         <Param id="pullUpRes" value="CY_GPIO_PULLUP_RES_DISABLE"/>
                         <Param id="sioOutputBuffer" value="true"/>
@@ -278,7 +278,7 @@
                 <Personality template="pin" version="3.0" instance="qJPzJ9UhY7E">
                     <Block location="ioss[0].port[13].pin[0]" locked="true"/>
                     <Parameters>
-                        <Param id="DriveModes" value="CY_GPIO_DM_STRONG_IN_OFF"/>
+                        <Param id="DriveModes" value="CY_GPIO_DM_HIGHZ"/>
                         <Param id="driveStrength" value="CY_GPIO_DRIVE_1_2"/>
                         <Param id="driveStrengthTrim" value="CY_GPIO_DRIVE_STRENGTH_DEFAULT"/>
                         <Param id="inFlash" value="true"/>
@@ -294,7 +294,7 @@
                 <Personality template="pin" version="3.0" instance="uFcQX-FD54U">
                     <Block location="ioss[0].port[13].pin[1]" locked="true"/>
                     <Parameters>
-                        <Param id="DriveModes" value="CY_GPIO_DM_HIGHZ"/>
+                        <Param id="DriveModes" value="CY_GPIO_DM_STRONG_IN_OFF"/>
                         <Param id="driveStrength" value="CY_GPIO_DRIVE_1_2"/>
                         <Param id="driveStrengthTrim" value="CY_GPIO_DRIVE_STRENGTH_DEFAULT"/>
                         <Param id="inFlash" value="true"/>
@@ -319,7 +319,7 @@
                     <Block location="peri[0].div_8[1]" locked="true"/>
                     <Parameters>
                         <Param id="fracDivider" value="0"/>
-                        <Param id="intDivider" value="1"/>
+                        <Param id="intDivider" value="11"/>
                         <Param id="startOnReset" value="true"/>
                     </Parameters>
                 </Personality>
@@ -327,7 +327,7 @@
                     <Block location="peri[0].div_8[2]" locked="true"/>
                     <Parameters>
                         <Param id="fracDivider" value="0"/>
-                        <Param id="intDivider" value="6"/>
+                        <Param id="intDivider" value="7"/>
                         <Param id="startOnReset" value="true"/>
                     </Parameters>
                 </Personality>
@@ -347,10 +347,50 @@
                         <Param id="startOnReset" value="true"/>
                     </Parameters>
                 </Personality>
+                <Personality template="pclk" version="3.0" instance="tRc1tdDdrBM">
+                    <Block location="peri[0].div_8[5]" locked="true"/>
+                    <Parameters>
+                        <Param id="fracDivider" value="0"/>
+                        <Param id="intDivider" value="1"/>
+                        <Param id="startOnReset" value="true"/>
+                    </Parameters>
+                </Personality>
+                <Personality template="pclk" version="3.0" instance="YFaqIJq_qoA">
+                    <Block location="peri[0].div_16[0]" locked="true"/>
+                    <Parameters>
+                        <Param id="fracDivider" value="0"/>
+                        <Param id="intDivider" value="5"/>
+                        <Param id="startOnReset" value="true"/>
+                    </Parameters>
+                </Personality>
+                <Personality template="pclk" version="3.0" instance="DUyJT2kRMjU">
+                    <Block location="peri[0].div_16[1]" locked="true"/>
+                    <Parameters>
+                        <Param id="fracDivider" value="0"/>
+                        <Param id="intDivider" value="1"/>
+                        <Param id="startOnReset" value="true"/>
+                    </Parameters>
+                </Personality>
                 <Personality template="pclk" version="3.0" instance="uc9fUq_RqeE">
                     <Block location="peri[0].div_16_5[0]" locked="true"/>
                     <Parameters>
-                        <Param id="fracDivider" value="28"/>
+                        <Param id="fracDivider" value="18"/>
+                        <Param id="intDivider" value="1"/>
+                        <Param id="startOnReset" value="true"/>
+                    </Parameters>
+                </Personality>
+                <Personality template="pclk" version="3.0" instance="jWXw4jvmYXw">
+                    <Block location="peri[0].div_16_5[1]" locked="true"/>
+                    <Parameters>
+                        <Param id="fracDivider" value="0"/>
+                        <Param id="intDivider" value="1"/>
+                        <Param id="startOnReset" value="true"/>
+                    </Parameters>
+                </Personality>
+                <Personality template="pclk" version="3.0" instance="U8qj2qcG7aA">
+                    <Block location="peri[0].div_24_5[0]" locked="true"/>
+                    <Parameters>
+                        <Param id="fracDivider" value="0"/>
                         <Param id="intDivider" value="1"/>
                         <Param id="startOnReset" value="true"/>
                     </Parameters>
@@ -386,7 +426,7 @@
                     </Block>
                     <Parameters>
                         <Param id="ApiMode" value="LOW_LEVEL"/>
-                        <Param id="BaudRate" value="5000000"/>
+                        <Param id="BaudRate" value="6000000"/>
                         <Param id="BitsOrder" value="CY_SCB_UART_LSB_FIRST"/>
                         <Param id="BreakLevel" value="0"/>
                         <Param id="BreakSignalBits" value="11"/>
@@ -495,7 +535,7 @@
                     <Parameters>
                         <Param id="ApiMode" value="LOW_LEVEL"/>
                         <Param id="BitsOrder" value="MSB_FIRST"/>
-                        <Param id="DataRate" value="5000"/>
+                        <Param id="DataRate" value="1000"/>
                         <Param id="DeassertSelectLine" value="false"/>
                         <Param id="DropOnParityError" value="false"/>
                         <Param id="EnableFreeRunSclk" value="false"/>
@@ -516,8 +556,8 @@
                         <Param id="IntrTxOverflow" value="false"/>
                         <Param id="IntrTxTrigger" value="false"/>
                         <Param id="IntrTxUnderflow" value="false"/>
-                        <Param id="ModeUser" value="CY_SCB_SPI_MASTER"/>
-                        <Param id="OvsFactor" value="15"/>
+                        <Param id="ModeUser" value="CY_SCB_SPI_SLAVE"/>
+                        <Param id="OvsFactor" value="4"/>
                         <Param id="Parity" value="CY_SCB_SPI_PARITY_NONE"/>
                         <Param id="RxDataWidth" value="8"/>
                         <Param id="RxTriggerLevel" value="63"/>
@@ -543,7 +583,7 @@
                     <Parameters>
                         <Param id="ApiMode" value="HIGH_LEVEL"/>
                         <Param id="BitsOrder" value="MSB_FIRST"/>
-                        <Param id="DataRate" value="1000"/>
+                        <Param id="DataRate" value="2000"/>
                         <Param id="DeassertSelectLine" value="false"/>
                         <Param id="DropOnParityError" value="false"/>
                         <Param id="EnableFreeRunSclk" value="false"/>
@@ -676,7 +716,7 @@
                 <Personality template="imo" version="3.0" instance="5duWvafcUU0">
                     <Block location="srss[0].clock[0].imo[0]" locked="true"/>
                     <Parameters>
-                        <Param id="trim" value="1"/>
+                        <Param id="trim" value="0.25"/>
                     </Parameters>
                 </Personality>
                 <Personality template="lfclk" version="3.0" instance="MpdJtWMyV0M">
@@ -847,6 +887,10 @@
                     <Port name="scb[5].spi_miso[0]"/>
                 </Net>
                 <Net>
+                    <Port name="peri[0].div_16[0].clk[0]"/>
+                    <Port name="scb[6].clock[0]"/>
+                </Net>
+                <Net>
                     <Port name="peri[0].div_16_5[0].clk[0]"/>
                     <Port name="scb[1].clock[0]"/>
                 </Net>
@@ -865,10 +909,6 @@
                 <Net>
                     <Port name="peri[0].div_8[3].clk[0]"/>
                     <Port name="scb[4].clock[0]"/>
-                </Net>
-                <Net>
-                    <Port name="peri[0].div_8[4].clk[0]"/>
-                    <Port name="scb[6].clock[0]"/>
                 </Net>
                 <Net>
                     <Port name="srss[0].clock[0].hfclk[2].root_clk[0]"/>
