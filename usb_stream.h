@@ -45,4 +45,7 @@ bool USB_Stream_Write(const uint8_t *data, uint32_t length);
 /* True once the host has selected a configuration. Cleared on bus reset. */
 extern volatile bool usbConfigured;
 
+/* Debug: counts every DW1 ISR fire. Read and reset from the main loop. */
+extern volatile uint32_t g_isrFireCount;
+
 #endif /* USB_STREAM_H_ */

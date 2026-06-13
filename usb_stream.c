@@ -58,15 +58,26 @@ static void Cy_Fx2g3_InitPeripheralClocks(bool adcClkEnable, bool usbfsClkEnable
     }
 }
 
+volatile uint32_t g_isrFireCount = 0;
+
 static void HbDma_Callback(cy_stc_hbdma_channel_t *handle, cy_en_hbdma_cb_type_t type,
                             cy_stc_hbdma_buff_status_t *pbufStat, void *userCtx)
 {
     (void)handle; (void)type; (void)pbufStat; (void)userCtx;
+    /* NOTE: this callback runs from the DW1 ISR (priority 5). Never call
+     * DBG_APP_INFO here — printNow=true polls USBFS which runs at lower
+     * priority, causing a deadlock that stalls the main loop. */
 }
 
-static void InEpDma_ISR(uint8_t endpNum)
+/* Overrides the __WEAK empty stub in usbfxstack's dma_isr.c. Must NOT be
+ * static: the library's Ep1InDma_ISR calls the global InEpDma_ISR symbol,
+ * and a static definition would leave the weak do-nothing stub linked in.
+ * With the stub, the DW1 interrupt is never cleared and re-fires forever,
+ * starving the main loop. */
+void InEpDma_ISR(uint8_t endpNum)
 {
     (void)endpNum;
+    g_isrFireCount++;
     Cy_HBDma_Mgr_HandleDW1Interrupt(&HBW_MgrCtxt);
 }
 
@@ -236,11 +247,6 @@ void Cy_USB_HS_ISR(void)
 void SysTick_Handler(void)
 {
     Cy_USBD_TickIncrement(&usbdCtxt);
-}
-
-void InEpDma_ISR_top(uint8_t endpNum)
-{
-    InEpDma_ISR(endpNum);
 }
 
 /*******************************************************************************

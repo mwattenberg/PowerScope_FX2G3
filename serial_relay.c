@@ -56,10 +56,11 @@ static void CS_ISR(void)
             Cy_SCB_SPI_ClearRxFifo(SPI_HW);
         } else {
             /* Rising edge: transaction complete.
-             * Wait for the SCB shift register to flush the last byte into the RX
-             * FIFO — on CPHA0 CS deasserts immediately after the last SCLK edge,
-             * which can race the shift register writeback by a few peripheral clocks. */
-            while (Cy_SCB_SPI_IsBusBusy(SPI_HW)) {}
+             * The shift register needs a few peripheral clocks after the last SCLK
+             * edge to latch the final byte into the RX FIFO.  A fixed NOP delay is
+             * sufficient and avoids an unbounded spin that would block the main loop
+             * if the SPI clock stopped (e.g. master enabled the SCB mid-transaction). */
+            Cy_SysLib_DelayUs(1U);
 
             uint32_t n = Cy_SCB_SPI_GetNumInRxFifo(SPI_HW);
             if (n > USB_PACKET_SIZE) n = USB_PACKET_SIZE;
@@ -149,9 +150,8 @@ void SerialRelay_VendorCmdHandler(cy_stc_usb_usbd_ctxt_t *pUsbdCtxt,
 
             uint32_t newBaud = (uint32_t)wValue | ((uint32_t)wIndex << 16);
             if (newBaud >= 300U && newBaud <= 6000000U) {
-                /* PERI_CLK = 75 MHz, oversample = 8x
-                 * div_x32 = (75 000 000 * 32) / (baud * 8) = 300 000 000 / baud */
-                uint32_t div_x32 = 300000000UL / newBaud;
+                /* div_x32 = (PERI_CLK * 32) / (baud * 8) = (PERI_CLK * 4) / baud */
+                uint32_t div_x32 = (Cy_SysClk_ClkPeriGetFrequency() * 4U) / newBaud;
                 uint32_t intDiv  = (div_x32 / 32U) - 1U;
                 uint32_t fracDiv = div_x32 % 32U;
 
@@ -198,41 +198,53 @@ void SerialRelay_Init(void)
 
 void SerialRelay_Run(void)
 {
+    /* TEST MODE: ignore SPI/UART entirely — send a fixed counter packet at ~100 ms.
+     * This bypasses the CS ISR and all peripheral data paths so we can confirm
+     * USB_Stream_Write works from the main loop context, both before and after the
+     * SPI mode switch vendor command. Remove once USB streaming is verified. */
+    /* Frame: 0xAA 0xAA header + 8 little-endian uint16_t counters (18 bytes).
+     * Counters start at 1,2,...,8 and advance by 1 each frame so PowerScope
+     * shows 8 moving ramp signals. */
+    static uint32_t testLoopCnt  = 0;
+    static uint16_t testBaseVal  = 1;
+    if (++testLoopCnt >= 1000U) {
+        testLoopCnt = 0;
+        if (streamingEnabled && usbConfigured) {
+            uint8_t frame[18];
+            frame[0] = 0xAA;
+            frame[1] = 0xAA;
+            for (uint32_t ch = 0; ch < 8U; ch++) {
+                uint16_t v = (uint16_t)(testBaseVal + ch);
+                frame[2U + 2U * ch]      = (uint8_t)(v & 0xFFU);
+                frame[2U + 2U * ch + 1U] = (uint8_t)(v >> 8);
+            }
+            testBaseVal++;
+            bool ok = USB_Stream_Write(frame, sizeof(frame));
+            DBG_APP_INFO("[SR] TestSend iface=%d ok=%d\r\n",
+                         (int)activeIface, (int)ok);
+        }
+    }
+
+    /* Drain SPI/UART FIFOs to prevent overflow, but do not forward data yet. */
     if (activeIface == SR_IFACE_UART) {
         uint32_t rxAvail = Cy_SCB_UART_GetNumInRxFifo(UART_HW);
-
-        if (streamingEnabled && usbConfigured) {
-            if (rxAvail > 0) {
-                uint32_t space  = USB_PACKET_SIZE - uartRxCount;
-                uint32_t toRead = (rxAvail < space) ? rxAvail : space;
-                Cy_SCB_UART_GetArray(UART_HW, &uartRxBuf[uartRxCount], toRead);
-                uartRxCount += toRead;
-            }
-            if (uartRxCount >= rxBufThreshold) {
-                if (USB_Stream_Write(uartRxBuf, uartRxCount))
-                    uartRxCount = 0;
-            }
-        } else {
-            /* Not streaming — drain to prevent FIFO overflow */
-            if (rxAvail > 0) {
-                uint8_t  discard[16];
-                uint32_t n = (rxAvail > 16U) ? 16U : rxAvail;
-                Cy_SCB_UART_GetArray(UART_HW, discard, n);
-            }
-            uartRxCount = 0;
+        if (rxAvail > 0) {
+            uint8_t  discard[16];
+            uint32_t n = (rxAvail > 16U) ? 16U : rxAvail;
+            Cy_SCB_UART_GetArray(UART_HW, discard, n);
         }
-
+        uartRxCount = 0;
     } else { /* SR_IFACE_SPI */
+        spiRxReady = false;
+    }
 
-        if (streamingEnabled && usbConfigured) {
-            if (spiRxReady) {
-                uint32_t len = spiRxLen;
-                spiRxReady = false;
-                USB_Stream_Write(spiStagingBuf, len);
-            }
-        } else {
-            spiRxReady = false;
-        }
+    /* Periodically print how often the DW1 ISR fires to gauge USB commit activity. */
+    static uint32_t loopCount = 0;
+    if (++loopCount >= 1000U) {
+        loopCount = 0;
+        uint32_t isrCnt = g_isrFireCount;
+        g_isrFireCount = 0;
+        DBG_APP_INFO("[SR] ISR fires/1000loops=%u\r\n", (unsigned)isrCnt);
     }
 
     /* Yield ~100µs per loop iteration. Without this the CM4 hammers SCB and

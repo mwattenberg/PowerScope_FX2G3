@@ -319,7 +319,7 @@
                     <Block location="peri[0].div_8[1]" locked="true"/>
                     <Parameters>
                         <Param id="fracDivider" value="0"/>
-                        <Param id="intDivider" value="1"/>
+                        <Param id="intDivider" value="11"/>
                         <Param id="startOnReset" value="true"/>
                     </Parameters>
                 </Personality>
@@ -335,7 +335,7 @@
                     <Block location="peri[0].div_8[3]" locked="true"/>
                     <Parameters>
                         <Param id="fracDivider" value="0"/>
-                        <Param id="intDivider" value="109"/>
+                        <Param id="intDivider" value="81"/>
                         <Param id="startOnReset" value="true"/>
                     </Parameters>
                 </Personality>
@@ -359,7 +359,7 @@
                     <Block location="peri[0].div_16[0]" locked="true"/>
                     <Parameters>
                         <Param id="fracDivider" value="0"/>
-                        <Param id="intDivider" value="7"/>
+                        <Param id="intDivider" value="5"/>
                         <Param id="startOnReset" value="true"/>
                     </Parameters>
                 </Personality>
@@ -374,8 +374,8 @@
                 <Personality template="pclk" version="3.0" instance="uc9fUq_RqeE">
                     <Block location="peri[0].div_16_5[0]" locked="true"/>
                     <Parameters>
-                        <Param id="fracDivider" value="3"/>
-                        <Param id="intDivider" value="2"/>
+                        <Param id="fracDivider" value="18"/>
+                        <Param id="intDivider" value="1"/>
                         <Param id="startOnReset" value="true"/>
                     </Parameters>
                 </Personality>
@@ -535,7 +535,7 @@
                     <Parameters>
                         <Param id="ApiMode" value="LOW_LEVEL"/>
                         <Param id="BitsOrder" value="MSB_FIRST"/>
-                        <Param id="DataRate" value="25000"/>
+                        <Param id="DataRate" value="1000"/>
                         <Param id="DeassertSelectLine" value="false"/>
                         <Param id="DropOnParityError" value="false"/>
                         <Param id="EnableFreeRunSclk" value="false"/>
@@ -660,7 +660,7 @@
                         <Param id="actionCsv" value="FAULT"/>
                         <Param id="divider" value="1"/>
                         <Param id="sourceClockCsv" value="IMO"/>
-                        <Param id="sourceClockNumber" value="0"/>
+                        <Param id="sourceClockNumber" value="1"/>
                     </Parameters>
                 </Personality>
                 <Personality template="hfclk" version="4.0" instance="_VA1_kAJhzM">
@@ -761,7 +761,7 @@
                 <Personality template="periclk" version="2.0" instance="dXUrbe2Zgrw">
                     <Block location="srss[0].clock[0].periclk[0]" locked="true"/>
                     <Parameters>
-                        <Param id="divider" value="1"/>
+                        <Param id="divider" value="2"/>
                     </Parameters>
                 </Personality>
                 <Personality template="pll" version="3.0" instance="PWwCupwH-a4">
@@ -785,7 +785,7 @@
                 <Personality template="slowclk" version="2.0" instance="x0dfMizS3e0">
                     <Block location="srss[0].clock[0].slowclk[0]" locked="true"/>
                     <Parameters>
-                        <Param id="divider" value="2"/>
+                        <Param id="divider" value="1"/>
                     </Parameters>
                 </Personality>
                 <Personality template="mxs40usbfsdevice" version="1.1" instance="2SQCb1KpPJQ">
